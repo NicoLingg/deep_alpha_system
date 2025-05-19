@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Order Book Snapshots{% endblock %}
+
+{% block content %}
+<div class="bg-light p-4 p-md-5 rounded">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Order Book Snapshots</h1>
+        {% if selected_symbol_id and order_book_stats and order_book_stats.total_snapshots > 0 %}
+        <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#orderBookStatsCollapse" aria-expanded="false" aria-controls="orderBookStatsCollapse">
+            Show/Hide Symbol Stats
+        </button>
+        {% endif %}
+    </div>
+
+     {% if query_error %}
+        <div class="alert alert-danger">{{ query_error }}</div>
+    {% endif %}
+
+    {% if selected_symbol_id and order_book_stats and order_book_stats.total_snapshots > 0 %}
+    <div class="collapse mb-4" id="orderBookStatsCollapse"> {# Ensure this ID matches data-bs-target #}
+        <div class="card card-body">
+            <h5>Statistics for Selected Symbol:</h5>
+            <dl class="row">
+                <dt class="col-sm-4">Total Snapshots Stored:</dt>
+                <dd class="col-sm-8">{{ "{:,}".format(order_book_stats.total_snapshots) }}</dd>
+
+                <dt class="col-sm-4">Oldest Snapshot:</dt>
+                <dd class="col-sm-8">{{ order_book_stats.min_time.strftime('%Y-%m-%d %H:%M:%S UTC') if order_book_stats.min_time else 'N/A' }}</dd>
+
+                <dt class="col-sm-4">Newest Snapshot:</dt>
+                <dd class="col-sm-8">{{ order_book_stats.max_time.strftime('%Y-%m-%d %H:%M:%S UTC') if order_book_stats.max_time else 'N/A' }}</dd>
+            </dl>
+        </div>
+    </div>
+    {% elif selected_symbol_id and order_book_stats and order_book_stats.total_snapshots == 0 and not query_error %}
+     <div class="alert alert-info mt-3">No order book snapshots found in the database for this symbol yet.</div>
+    {% endif %}
+
+    <form method="GET" action="{{ url_for('view_order_book') }}" class="row g-3 mb-4 align-items-end">
+        <div class="col-md-4">
+            <label for="symbol_id" class="form-label">Symbol</label>
+            <select name="symbol_id" id="symbol_id" class="form-select">
+                {% if not symbols %}
+                <option value="">No symbols in DB</option>
+                {% endif %}
+                {% for sym in symbols %}
+                <option value="{{ sym.symbol_id }}" {% if sym.symbol_id == selected_symbol_id %}selected{% endif %}>
+                    {{ sym.instrument_name }} ({{ sym.base_asset }}/{{ sym.quote_asset }})
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label for="display_levels" class="form-label">Display Levels</label>
+            <input type="number" name="display_levels" id="display_levels" class="form-control" value="{{ display_levels }}" min="1" max="100">
+        </div>
+        <div class="col-md-2">
+            <label for="history_count" class="form-label">History Count</label>
+            <input type="number" name="history" id="history_count" class="form-control" value="{{ history_count }}" min="1" max="20">
+        </div>
+        <div class="col-md-2">
+            <button type="submit" class="btn btn-primary w-100">Fetch Snapshots</button>
+        </div>
+    </form>
+
+    {% if snapshots_list %}
+        <p>Showing last {{ snapshots_list|length }} snapshot(s). Displaying top {{ display_levels }} levels for each.</p>
+        {% for snapshot in snapshots_list %}
+        <div class="card mb-4">
+            <div class="card-header">
+                Snapshot for <strong>{{ snapshot.instrument_name }}</strong> at {{ snapshot.time.strftime('%Y-%m-%d %H:%M:%S UTC') }} (LUID: {{ snapshot.last_update_id }})
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h5>Bids</h5>
+                        <div class="table-responsive" style="max-height: 300px;">
+                            <table class="table table-sm table-striped order-book-table">
+                                <thead class="table-success"><tr><th>Price</th><th>Quantity</th><th>Total (Quote)</th></tr></thead>
+                                <tbody>
+                                    {% for bid in snapshot.bids[:display_levels] %}
+                                    <tr>
+                                        <td>{{ "%.8f"|format(bid[0]|float) }}</td>
+                                        <td>{{ "%.4f"|format(bid[1]|float) }}</td>
+                                        <td>{{ "%.4f"|format((bid[0]|float) * (bid[1]|float)) }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                    {% if not snapshot.bids %}
+                                    <tr><td colspan="3" class="text-center">No bids</td></tr>
+                                    {% endif %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <h5>Asks</h5>
+                        <div class="table-responsive" style="max-height: 300px;">
+                            <table class="table table-sm table-striped order-book-table">
+                                <thead class="table-danger"><tr><th>Price</th><th>Quantity</th><th>Total (Quote)</th></tr></thead>
+                                <tbody>
+                                    {% for ask in snapshot.asks[:display_levels] %}
+                                    <tr>
+                                        <td>{{ "%.8f"|format(ask[0]|float) }}</td>
+                                        <td>{{ "%.4f"|format(ask[1]|float) }}</td>
+                                        <td>{{ "%.4f"|format((ask[0]|float) * (ask[1]|float)) }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                    {% if not snapshot.asks %}
+                                    <tr><td colspan="3" class="text-center">No asks</td></tr>
+                                    {% endif %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% elif request.args.get('symbol_id') and not query_error and order_book_stats and order_book_stats.total_snapshots == 0 %}
+        {# This message is now shown if stats indicate 0 snapshots, instead of relying on snapshots_list which is limited by history_count #}
+    {% elif not symbols and not selected_symbol_id %}
+         {# Flash message "No symbols found..." handles this #}
+    {% endif %}
+</div>
+{% endblock %}

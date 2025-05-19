@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg17
+    container_name: deep_alpha_timescaledb
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescaledb_data:/home/postgres/pgdata/data
+    environment:
+      - POSTGRES_USER=deep_alpha_user 
+      - POSTGRES_PASSWORD=your_strong_password_here 
+      - POSTGRES_DB=deep_alpha_data_db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deep_alpha_user -d deep_alpha_data_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  timescaledb_data:
+
