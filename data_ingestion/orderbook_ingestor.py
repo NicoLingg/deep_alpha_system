@@ -5,7 +5,6 @@ import psycopg2
 import argparse
 from datetime import datetime
 
-# Use relative import for utils when run as a module (-m)
 try:
     from .utils import (
         load_config,
@@ -202,6 +201,7 @@ if __name__ == "__main__":
         with db_connection.cursor() as cursor:
             # Assuming exchange_id = 1 for "Binance" is already created by kline_ingestor
             # or can be created here too if get_or_create_exchange_id is in utils
+            # Here we also assume that we only have one exchange, Binance. Might change in the future.
             exchange_id_val = get_or_create_exchange_id(cursor, "Binance")
             # This script should not create symbols if they don't exist,
             # kline_ingestor or a dedicated symbol management should handle that.
@@ -210,7 +210,7 @@ if __name__ == "__main__":
             symbol_id_val = get_or_create_symbol_id(
                 cursor, exchange_id_val, args.symbol, base_asset=None, quote_asset=None
             )
-            db_connection.commit()  # Commit if exchange/symbol was created
+            db_connection.commit()
 
         if (
             symbol_id_val is None

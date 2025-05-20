@@ -4,3 +4,4 @@ pandas
 flask
 werkzeug==2.0.1
 Flask-HTTPAuth
+tqdm

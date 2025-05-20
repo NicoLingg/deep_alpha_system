@@ -1,20 +1,28 @@
 # Deep Alpha System
 
-**Deep Alpha System** is a comprehensive framework for collecting, storing, analyzing financial market data (initially from Binance), and providing a foundation for developing and training machine learning models for trading strategies.
+<p align="center">
+  <img src="assets/logo.png" alt="Deep Alpha System Logo" width="250">
+</p>
+
+**Deep Alpha System** serves as an exploratory environment for those looking to delve into machine learning applications for financial markets and gain hands-on experience with the components of a quantitative trading pipeline. It provides a practical framework for collecting, storing, and analyzing market data (initially from Binance) as a basis for developing and evaluating trading strategies.
 
 The system is designed to:
-1.  Ingest high-resolution kline (candlestick) data (e.g., 1-minute) as the source of truth.
-2.  Periodically collect order book snapshots.
-3.  Store this data efficiently in a TimescaleDB database, leveraging its time-series capabilities.
-4.  Automatically create aggregated views (e.g., 5-min, 1-hour, 1-day klines) using TimescaleDB Continuous Aggregates.
-5.  Provide a basic web UI for data visualization and inspection.
-6.  Offer a structured environment for feature engineering and training ML models (future goal).
+1.  Define and manage a local list of relevant financial instrument symbols.
+2.  Ingest high-resolution kline (candlestick) data (e.g., 1-minute) for these symbols, serving as the source of truth.
+3.  Periodically collect order book snapshots for selected symbols.
+4.  Store this data efficiently in a TimescaleDB database, leveraging its time-series capabilities.
+5.  Automatically create aggregated views (e.g., 5-min, 1-hour, 1-day klines) using TimescaleDB Continuous Aggregates.
+6.  Provide a basic web UI for data visualization and inspection.
+7.  Offer a structured environment for feature engineering and training ML models (future goal).
+
+**Note:** This project is currently under active development. Core data ingestion and storage functionalities are operational. Feature engineering and machine learning model integration are planned future additions.
 
 ## Features
 
-*   **Automated Data Ingestion:**
-    *   Historical 1-minute kline data downloader for specified symbols and date ranges.
-    *   Continuous polling script for collecting order book snapshots at configurable intervals.
+*   **Staged Data Ingestion Workflow:**
+    *   **Stage 1 (Symbol Definition):** Updates the local database's `symbols` table from the Binance API based on configurable filters (status, permissions, quote asset).
+    *   **Stage 2 (Kline Ingestion):** Fetches historical 1-minute kline data for symbols *already defined* in the local database, with support for concurrent fetching and smart range determination to minimize redundant downloads.
+*   **Order Book Collection:** Continuous polling script for collecting order book snapshots at configurable intervals.
 *   **Robust Data Storage:**
     *   Utilizes PostgreSQL with the TimescaleDB extension for optimized time-series data handling.
     *   Schema includes tables for exchanges, symbols, raw klines, and order book snapshots.
@@ -25,32 +33,34 @@ The system is designed to:
     *   A Flask-based web UI to view kline data (raw and aggregated) and order book snapshots.
     *   Symbol statistics (data counts, date ranges) available in the UI.
 *   **Orchestration with Makefile:**
-    *   Simplified commands for setting up the database, ingesting data, running the web UI, and managing the system.
+    *   Simplified commands for setting up the database, managing symbols, ingesting data, running the web UI, and other maintenance tasks.
 *   **Dockerized Database:**
     *   TimescaleDB runs in a Docker container for easy setup and portability.
-*   **Modular Python Code:**
-    *   Data ingestion scripts are organized into a Python package.
-    *   Shared utilities for database connections and client initializations.
-*   **Foundation for ML:**
-    *   The structured data storage and clear data ingestion pipeline provide a solid base for building ML models (ML components to be implemented).
 
 ## Project Structure (Overview)
 
 *   `config/`: Contains configuration files (e.g., `config.ini`).
-*   `data_ingestion/`: Python scripts for fetching data from Binance and storing it.
+*   `data_ingestion/`: Python scripts for managing symbols and fetching data from Binance.
+    *   `manage_symbols.py`: Stage 1 - Updates local symbol definitions.
+    *   `populate_db.py`: Stage 2 - Fetches klines for symbols in the local DB.
+    *   `kline_ingestor.py`: Core kline fetching and storage logic (used by `populate_db.py` and for single fetches).
+    *   `orderbook_ingestor.py`: Collects order book data.
+    *   `utils.py`: Shared utility functions.
+    *   `symbol_utils.py`: Utilities like finding top liquid symbols.
 *   `db/`: SQL schema definitions (`schema.sql`).
-*   `web_ui/`: Flask application for the web interface, including templates and static files.
-*   `Makefile`: For automating common tasks like setup, data ingestion, and running services.
+*   `web_ui/`: Flask application for the web interface.
+*   `Makefile`: For automating common tasks.
 *   `docker-compose.yml`: Defines the TimescaleDB service.
 *   `requirements.txt`: Python dependencies.
+
 
 ## Prerequisites
 
 *   **Docker and Docker Compose:** For running the TimescaleDB database.
 *   **Python 3.8+:** For running the data ingestion scripts and web UI.
 *   **Make:** For using the Makefile commands.
-*   **Conda (Recommended for environment management):** While optional (you can use `venv`), Conda is recommended.
-*   **Binance Account (Optional):** API keys are optional for public data but might provide higher rate limits if used.
+*   **Conda (Recommended for environment management):** While optional (you can use `venv` too)
+*   **Binance Account (Optional):** API keys are not strictly needed for public data but might provide higher rate limits if used.
 
 ## Setup and Installation
 
@@ -61,159 +71,124 @@ The system is designed to:
     ```
 
 2.  **Set up Python Environment (Conda Recommended):**
-    It's highly recommended to use a virtual environment to manage project dependencies.
-
-    **Using Conda (Recommended):**
     If you don't have Conda, download and install [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://www.anaconda.com/products/distribution).
     ```bash
-    # Create a new Conda environment (e.g., named 'deep_alpha_env' with Python 3.9)
+    # Create a new Conda environment (e.g., named 'deep_alpha_env' with Python 3.9 or higher)
     conda create --name deep_alpha_env python=3.9 -y
-
-    # Activate the environment
     conda activate deep_alpha_env
     ```
-    You'll need to activate this environment (`conda activate deep_alpha_env`) every time you work on the project in a new terminal session.
-
-    **Using `venv` (Alternative):**
-    If you prefer not to use Conda, you can use Python's built-in `venv` module:
-    ```bash
-    # Create a virtual environment (e.g., named 'venv')
-    python3 -m venv venv
-
-    # Activate the environment
-    # On macOS and Linux:
-    source venv/bin/activate
-    # On Windows:
-    # .\venv\Scripts\activate
-    ```
+    Activate this environment (`conda activate deep_alpha_env`) every time you work on the project.
 
 3.  **Install Python Dependencies:**
-    Ensure your virtual environment (Conda or venv) is activated.
+    Ensure your virtual environment is activated.
     ```bash
     pip install -r requirements.txt
     ```
 
 4.  **Configure Passwords and API Keys:**
-    *   It's good practice to create `config/config.ini` from an example. If `config/config.ini.example` exists:
-        ```bash
-        cp config/config.ini.example config/config.ini
-        ```
-        Otherwise, ensure `config/config.ini` is present or create it based on the required structure.
-    *   Open `config/config.ini` and update the `password` under the `[database]` section. **This password MUST match** the `POSTGRES_PASSWORD` in `docker-compose.yml`.
-    *   Optionally, add your Binance API `api_key` and `api_secret` under the `[binance]` section if you have them.
-    *   Open `docker-compose.yml` and update `POSTGRES_PASSWORD` to match the password you set in `config.ini`.
-    *   **IMPORTANT SECURITY NOTE:** Do not commit your actual `config.ini` with real passwords or API keys to a public repository. The file `config/config.ini` should ideally be listed in your `.gitignore` file (if it isn't already meant to be a template).
+    *   Copy `config/config.ini.example` to `config/config.ini` if an example file exists, or ensure `config/config.ini` is present.
+    *   Open `config/config.ini`:
+        *   Update `password` under `[database]`. **This MUST match** `POSTGRES_PASSWORD` in `docker-compose.yml`.
+        *   Update `username` and `password` under `[webui_auth]` if you want to protect the Web UI.
+        *   Optionally, add your Binance `api_key` and `api_secret` under `[binance]`.
+    *   Open `docker-compose.yml` and update `POSTGRES_PASSWORD` to match the database password you set in `config.ini`.
+    *   **SECURITY NOTE:** Do not commit `config.ini` with real credentials to a public repository. It should ideally be in `.gitignore` (unless it's intended as a template without secrets).
 
-5.  **Start the Database Container:**
-    This command will download the TimescaleDB image (if not already present) and start the database container in the background.
+5.  **Start Database & Initialize Schema (Combined Target):**
+    This command starts the Dockerized TimescaleDB and applies the database schema.
     ```bash
-    make up
+    make setup-db
     ```
-    Wait for the message "Database is ready." If you encounter issues, check the logs: `make logs`.
-
-6.  **Initialize the Database Schema:**
-    This applies the schema defined in `db/schema.sql` to the running database, creating tables, hypertables, and continuous aggregates.
-    ```bash
-    make init-db
-    ```
+    Wait for "Database is ready." and "Database schema applied successfully." If issues occur, check logs: `make logs`.
 
 ## Usage
 
-The `Makefile` provides convenient targets for managing the system. Ensure your Python environment (Conda or venv) is activated before running `make` targets that execute Python scripts.
+The `Makefile` provides convenient targets. Ensure your Python environment is activated. Date parameters (`START_DATE`, `END_DATE`) generally expect specific formats like "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS".
 
-### Data Ingestion
+### Core Data Ingestion Workflow
 
-**1. Fetching Historical 1-Minute Kline Data:**
-   This script (`data_ingestion/kline_ingestor.py`) downloads 1-minute kline data which serves as the source for all aggregated views.
+**Stage 1: Update Symbol Definitions**
+This populates/updates your local `symbols` table from the Binance API. Symbols are filtered based on `config.ini` settings under `[symbol_management]` or can be overridden by Makefile variables.
+```bash
+make update-symbol-definitions
+```
+To customize filters (see `Makefile` help for variable names):
+```bash
+make update-symbol-definitions SYM_STATUSES="TRADING,END_OF_TRADING" SYM_PERMISSIONS_HINT="SPOT" SYM_QUOTE_ASSET="USDT"
+```
+*   `SYM_STATUSES`: Comma-separated list (e.g., "TRADING,END_OF_TRADING").
+*   `SYM_PERMISSIONS_HINT`: Comma-separated list (e.g., "SPOT").
+*   `SYM_QUOTE_ASSET`: Specific quote asset (e.g., "USDT", "BTC").
 
-   *   **Fetch for a single symbol (default: BTCUSDT, from 1 day ago):**
-        ```bash
-        make fetch-klines
-        ```
-   *   **Fetch for a specific symbol and start date:**
-        ```bash
-        make fetch-klines SYMBOL=ETHUSDT START_DATE="2023-01-01"
-        ```
-   *   **Fetch for a specific date range:**
-        ```bash
-        make fetch-klines SYMBOL=SOLUSDT START_DATE="2023-06-01" END_DATE="2023-07-01"
-        ```
+**Stage 2: Fetch Klines for Defined Symbols**
+This fetches kline data for symbols that are *already in your local database* (populated by Stage 1).
+```bash
+make fetch-klines-from-db
+```
+This uses defaults from `config.ini` (e.g., `default_start_date`, `default_db_quote_asset_filter`, `default_kline_fetch_api_status_filter`).
 
-   *   **Bulk Fetch for Multiple Symbols:**
-        1.  (Optional) Identify liquid symbols:
-            ```bash
-            make get-liquid-symbols TOP_N=10 QUOTE_ASSET=USDT MIN_VOLUME=5000000
-            ```
-        2.  Edit the `BULK_SYMBOLS` variable in the `Makefile` with the list of symbols you want.
-        3.  Run the bulk fetch (uses `START_DATE` and optional `END_DATE` from Makefile or command line):
-            ```bash
-            make fetch-klines-bulk START_DATE="2024-01-01"
-            ```
-            This will iterate through the `BULK_SYMBOLS` list, fetching data for each with a small delay in between.
+To customize, for example, to fetch data for all USDT pairs from 2022-01-01, attempting to get klines regardless of their current live API status (useful for `END_OF_TRADING` symbols):
+```bash
+make fetch-klines-from-db KLINE_FETCH_DB_QUOTE_ASSET="USDT" KLINE_FETCH_START_DATE="2022-01-01" KLINE_FETCH_API_STATUS_FILTER=NONE
+```
+*   See `make help` for all `KLINE_FETCH_*` variables.
 
-**2. Collecting Order Book Snapshots:**
-   This script (`data_ingestion/orderbook_ingestor.py`) runs continuously to poll and store order book snapshots at regular intervals.
+### Other Data Targets
 
-   *   **Start collecting for a symbol (default: BTCUSDT, every 60s, 100 levels):**
-        ```bash
-        make collect-orderbook-snapshots
-        ```
-   *   **Collect for a specific symbol with custom interval and limit:**
-        ```bash
-        make collect-orderbook-snapshots SNAPSHOT_SYMBOL=ADAUSDT SNAPSHOT_INTERVAL_SECONDS=30 SNAPSHOT_LIMIT=50
-        ```
-   Press `Ctrl+C` to stop the collector script gracefully.
+**Fetch Klines for a Single Symbol (Legacy/Direct)**
+Useful for quick tests or fetching specific symbols not covered by bulk logic.
+```bash
+# Uses default START_DATE from Makefile (e.g., "2024-01-01")
+make fetch-single-kline SYMBOL=BTCUSDT
 
-**3. Refreshing Continuous Aggregates:**
-   While policies refresh aggregates automatically, you can trigger a manual refresh:
-   ```bash
-   make refresh-aggregates
-   ```
+# Specific date range
+make fetch-single-kline SYMBOL=ETHUSDT START_DATE="2023-01-01" END_DATE="2023-01-05"
 
-## Web UI
+# Fetch to latest
+make fetch-single-kline SYMBOL=ADAUSDT START_DATE="2024-05-01"
+```
 
-To start the web UI:
+**Collect Order Book Snapshots**
+Runs continuously. Press `Ctrl+C` to stop.
+```bash
+make collect-orderbook-snapshots SNAPSHOT_SYMBOL=BTCUSDT SNAPSHOT_INTERVAL_SECONDS=30
+```
+
+**Refresh Continuous Aggregates**
+Manually trigger updates for TimescaleDB materialized views.
+```bash
+make refresh-aggregates
+```
+
+### Web UI
+
+Start the Flask web interface:
 ```bash
 make webui
 ```
-Once running, you can access the UI in your browser, typically at `http://localhost:5001` or `http://0.0.0.0:5001`.
+Access in your browser, typically at `http://localhost:5004` (or as configured in `web_ui/webui.py`).
 
+It will look like this:
 ![alt text](assets/data_viewer.png)
 
 ### Database Management
 
-Common Makefile targets for managing the database:
-
-*   **Access psql shell:**
-    ```bash
-    make db-shell
-    ```
-*   **Stop database container:**
-    ```bash
-    make down
-    ```
-*   **View database logs:**
-    ```bash
-    make logs
-    ```
-*   **Clean database data (WARNING: destructive):**
-    This command will stop the database container and remove all its persisted data.
-    ```bash
-    make clean-db-data
-    ```
+*   **Access psql shell:** `make db-shell`
+*   **Stop database container:** `make down`
+*   **View database logs:** `make logs`
+*   **Clean database data (WARNING: destructive):** `make clean-db-data` (stops container and removes data volume)
 
 ## Troubleshooting
 
 *   **Database Connection Issues:**
-    *   Ensure the TimescaleDB Docker container is running: `docker ps`
-    *   Verify that `POSTGRES_PASSWORD` in `docker-compose.yml` matches the `password` in `config/config.ini`.
-    *   Check that the `host` and `port` in `config/config.ini` (e.g., `host = localhost`, `port = 5433`) match the host-side port mapping in `docker-compose.yml` (e.g., `ports: - "5433:5432"`).
-
+    *   Ensure Docker container is running (`docker ps`).
+    *   Verify passwords match between `config.ini` and `docker-compose.yml`.
+    *   Confirm host/port in `config.ini` matches Docker port mapping.
 *   **Port Conflicts:**
-    *   If port `5433` (for the database) or `5001` (for the web UI) is already in use on your system, you'll need to change it.
-    *   **For the database:** Modify the host-side port in `docker-compose.yml` (e.g., change `"5433:5432"` to `"5434:5432"`) and update the `port` in `config/config.ini` accordingly (e.g., to `5434`).
-    *   **For the web UI:** Change the port in `web_ui/webui.py` (where `app.run` is called) and/or in the `Makefile` if it's hardcoded there for the `webui` target.
-
+    *   If port `5433` (DB) or `5004` (WebUI) is in use, change the host-side port in `docker-compose.yml` (e.g., `"5435:5432"`) and update `config.ini` (`port = 5435`). For WebUI, change in `web_ui/webui.py`.
 *   **Python `ModuleNotFoundError`:**
-    *   Make sure your Python virtual environment (Conda or `venv`) is activated.
-    *   Ensure you have installed all dependencies: `pip install -r requirements.txt`
+    *   Ensure your Python virtual environment is activated.
+    *   Run `pip install -r requirements.txt`.
+*   **Date Parsing Errors for Kline Ingestion:**
+    *   Ensure `START_DATE` and `END_DATE` provided to `make fetch-single-kline` or `make fetch-klines-from-db` (or set in `config.ini`) use the format "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS". Relative dates like "1 day ago" are no longer supported for these parameters.
+
