@@ -16,38 +16,43 @@
         <div class="alert alert-danger">{{ query_error }}</div>
     {% endif %}
 
-    {% if selected_symbol_id and order_book_stats and order_book_stats.total_snapshots > 0 %}
-    <div class="collapse mb-4" id="orderBookStatsCollapse"> {# Ensure this ID matches data-bs-target #}
+    {% if selected_symbol_id and order_book_stats %}
+    <div class="collapse mb-4" id="orderBookStatsCollapse">
         <div class="card card-body">
-            <h5>Statistics for Selected Symbol:</h5>
+            <h5>Statistics for {{ symbols|selectattr('symbol_id', 'equalto', selected_symbol_id)|first|attr('instrument_name') }}:</h5>
             <dl class="row">
                 <dt class="col-sm-4">Total Snapshots Stored:</dt>
-                <dd class="col-sm-8">{{ "{:,}".format(order_book_stats.total_snapshots) }}</dd>
+                <dd class="col-sm-8">{{ "{:,}".format(order_book_stats.total_snapshots) if order_book_stats.total_snapshots is not none else 'N/A' }}</dd>
 
+                {% if order_book_stats.total_snapshots > 0 %}
                 <dt class="col-sm-4">Oldest Snapshot:</dt>
                 <dd class="col-sm-8">{{ order_book_stats.min_time.strftime('%Y-%m-%d %H:%M:%S UTC') if order_book_stats.min_time else 'N/A' }}</dd>
 
                 <dt class="col-sm-4">Newest Snapshot:</dt>
                 <dd class="col-sm-8">{{ order_book_stats.max_time.strftime('%Y-%m-%d %H:%M:%S UTC') if order_book_stats.max_time else 'N/A' }}</dd>
+                {% endif %}
             </dl>
         </div>
     </div>
-    {% elif selected_symbol_id and order_book_stats and order_book_stats.total_snapshots == 0 and not query_error %}
+    {% endif %}
+    
+    {% if selected_symbol_id and order_book_stats and order_book_stats.total_snapshots == 0 and not query_error and not snapshots_list %}
      <div class="alert alert-info mt-3">No order book snapshots found in the database for this symbol yet.</div>
     {% endif %}
 
     <form method="GET" action="{{ url_for('view_order_book') }}" class="row g-3 mb-4 align-items-end">
         <div class="col-md-4">
             <label for="symbol_id" class="form-label">Symbol</label>
-            <select name="symbol_id" id="symbol_id" class="form-select">
-                {% if not symbols %}
+            <select name="symbol_id" id="symbol_id" class="form-select" onchange="this.form.submit()">
+                 {% if not symbols %}
                 <option value="">No symbols in DB</option>
+                {% else %}
+                    {% for sym in symbols %}
+                    <option value="{{ sym.symbol_id }}" {% if sym.symbol_id == selected_symbol_id %}selected{% endif %}>
+                        {{ sym.instrument_name }} ({{ sym.base_asset }}/{{ sym.quote_asset }})
+                    </option>
+                    {% endfor %}
                 {% endif %}
-                {% for sym in symbols %}
-                <option value="{{ sym.symbol_id }}" {% if sym.symbol_id == selected_symbol_id %}selected{% endif %}>
-                    {{ sym.instrument_name }} ({{ sym.base_asset }}/{{ sym.quote_asset }})
-                </option>
-                {% endfor %}
             </select>
         </div>
         <div class="col-md-2">
@@ -78,16 +83,15 @@
                             <table class="table table-sm table-striped order-book-table">
                                 <thead class="table-success"><tr><th>Price</th><th>Quantity</th><th>Total (Quote)</th></tr></thead>
                                 <tbody>
-                                    {% for bid in snapshot.bids[:display_levels] %}
+                                    {% for bid_price, bid_qty in snapshot.bids[:display_levels] %}
                                     <tr>
-                                        <td>{{ "%.8f"|format(bid[0]|float) }}</td>
-                                        <td>{{ "%.4f"|format(bid[1]|float) }}</td>
-                                        <td>{{ "%.4f"|format((bid[0]|float) * (bid[1]|float)) }}</td>
+                                        <td>{{ "%.8f"|format(bid_price|float) }}</td>
+                                        <td>{{ "%.4f"|format(bid_qty|float) }}</td>
+                                        <td>{{ "%.4f"|format((bid_price|float) * (bid_qty|float)) }}</td>
                                     </tr>
-                                    {% endfor %}
-                                    {% if not snapshot.bids %}
+                                    {% else %}
                                     <tr><td colspan="3" class="text-center">No bids</td></tr>
-                                    {% endif %}
+                                    {% endfor %}
                                 </tbody>
                             </table>
                         </div>
@@ -98,16 +102,15 @@
                             <table class="table table-sm table-striped order-book-table">
                                 <thead class="table-danger"><tr><th>Price</th><th>Quantity</th><th>Total (Quote)</th></tr></thead>
                                 <tbody>
-                                    {% for ask in snapshot.asks[:display_levels] %}
+                                     {% for ask_price, ask_qty in snapshot.asks[:display_levels] %}
                                     <tr>
-                                        <td>{{ "%.8f"|format(ask[0]|float) }}</td>
-                                        <td>{{ "%.4f"|format(ask[1]|float) }}</td>
-                                        <td>{{ "%.4f"|format((ask[0]|float) * (ask[1]|float)) }}</td>
+                                        <td>{{ "%.8f"|format(ask_price|float) }}</td>
+                                        <td>{{ "%.4f"|format(ask_qty|float) }}</td>
+                                        <td>{{ "%.4f"|format((ask_price|float) * (ask_qty|float)) }}</td>
                                     </tr>
-                                    {% endfor %}
-                                    {% if not snapshot.asks %}
+                                    {% else %}
                                     <tr><td colspan="3" class="text-center">No asks</td></tr>
-                                    {% endif %}
+                                    {% endfor %}
                                 </tbody>
                             </table>
                         </div>
@@ -116,10 +119,10 @@
             </div>
         </div>
         {% endfor %}
-    {% elif request.args.get('symbol_id') and not query_error and order_book_stats and order_book_stats.total_snapshots == 0 %}
-        {# This message is now shown if stats indicate 0 snapshots, instead of relying on snapshots_list which is limited by history_count #}
-    {% elif not symbols and not selected_symbol_id %}
-         {# Flash message "No symbols found..." handles this #}
+    {% elif selected_symbol_id and not query_error and (not order_book_stats or order_book_stats.total_snapshots == 0) %}
+        {# Message already shown above if stats indicate 0 snapshots #}
+    {% elif not symbols %}
+         {# Flash message "No symbols found..." handles this from Python #}
     {% endif %}
 </div>
 {% endblock %}

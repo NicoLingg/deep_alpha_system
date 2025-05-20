@@ -169,7 +169,7 @@ make webui
 Access in your browser, typically at `http://localhost:5004` (or as configured in `web_ui/webui.py`).
 
 It will look like this:
-![alt text](assets/data_viewer.png)
+![alt text](assets/data_viewer.gif)
 
 ### Database Management
 

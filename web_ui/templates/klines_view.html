@@ -12,15 +12,14 @@
         {% endif %}
     </div>
 
-    {# Flash messages will be displayed by base.html #}
-     {% if query_error %}
+    {% if query_error %}
         <div class="alert alert-danger">{{ query_error }}</div>
     {% endif %}
 
     {% if selected_symbol_id and kline_stats %}
     <div class="collapse mb-4" id="klineStatsCollapse">
         <div class="card card-body">
-            <h5>Statistics for Selected Symbol:</h5>
+            <h5>Statistics for {{ symbols|selectattr('symbol_id', 'equalto', selected_symbol_id)|first|attr('instrument_name') }} ({{current_view_info.label}}):</h5>
             <dl class="row">
                 <dt class="col-sm-4">Raw 1-Minute Klines Count:</dt>
                 <dd class="col-sm-8">{{ "{:,}".format(kline_stats.raw_1m_count) if kline_stats.raw_1m_count else 'N/A' }}</dd>
@@ -31,7 +30,7 @@
                 <dt class="col-sm-4">Raw 1m Data To:</dt>
                 <dd class="col-sm-8">{{ kline_stats.raw_1m_max_time.strftime('%Y-%m-%d %H:%M:%S UTC') if kline_stats.raw_1m_max_time else 'N/A' }}</dd>
             </dl>
-            <h6>Continuous Aggregates:</h6>
+            <h6>Continuous Aggregates for this Symbol:</h6>
             <div class="table-responsive" style="max-height: 200px;">
                 <table class="table table-sm table-bordered">
                     <thead>
@@ -51,7 +50,7 @@
                             <td>{{ agg_stat.max_time.strftime('%Y-%m-%d %H:%M:%S') if agg_stat.max_time else 'N/A' }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="4">No aggregate stats available.</td></tr>
+                        <tr><td colspan="4">No aggregate stats available for this symbol.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -62,49 +61,51 @@
 
 
     <form method="GET" action="{{ url_for('view_klines') }}" class="row g-3 mb-4 align-items-end">
-        <!-- ... form remains the same as previous version ... -->
         <div class="col-md-3">
             <label for="symbol_id" class="form-label">Symbol</label>
-            <select name="symbol_id" id="symbol_id" class="form-select">
+            <select name="symbol_id" id="symbol_id" class="form-select" onchange="this.form.submit()">
                 {% if not symbols %}
                 <option value="">No symbols in DB</option>
+                {% else %}
+                    {% for sym in symbols %}
+                    <option value="{{ sym.symbol_id }}" {% if sym.symbol_id == selected_symbol_id %}selected{% endif %}>
+                        {{ sym.instrument_name }} ({{ sym.base_asset }}/{{ sym.quote_asset }})
+                    </option>
+                    {% endfor %}
                 {% endif %}
-                {% for sym in symbols %}
-                <option value="{{ sym.symbol_id }}" {% if sym.symbol_id == selected_symbol_id %}selected{% endif %}>
-                    {{ sym.instrument_name }} ({{ sym.base_asset }}/{{ sym.quote_asset }})
-                </option>
-                {% endfor %}
             </select>
         </div>
         <div class="col-md-2">
             <label for="interval" class="form-label">Interval</label>
             <select name="interval" id="interval" class="form-select">
-                {% for key, info in aggregated_intervals_map.items() %}
+                {% for key, info in AGGREGATED_INTERVALS_MAP.items() %} {# Uses global map #}
                 <option value="{{ key }}" {% if key == selected_interval_key %}selected{% endif %}>{{ info.label }}</option>
                 {% endfor %}
             </select>
         </div>
-        <div class="col-md-auto" style="min-width: 180px;">
+        <div class="col-md-auto" style="min-width: 190px;"> <!-- Increased width for datetime-local -->
             <label for="start_time" class="form-label">Start (UTC)</label>
-            <input type="datetime-local" class="form-control" id="start_time" name="start_time" value="{{ default_start_time }}">
+            <input type="datetime-local" class="form-control" id="start_time" name="start_time" value="{{ start_time_for_input }}">
         </div>
-        <div class="col-md-auto" style="min-width: 180px;">
+        <div class="col-md-auto" style="min-width: 190px;"> <!-- Increased width for datetime-local -->
             <label for="end_time" class="form-label">End (UTC)</label>
-            <input type="datetime-local" class="form-control" id="end_time" name="end_time" value="{{ default_end_time }}">
+            <input type="datetime-local" class="form-control" id="end_time" name="end_time" value="{{ end_time_for_input }}">
         </div>
         <div class="col-md-1">
             <label for="limit" class="form-label">Limit</label>
-            <input type="number" name="limit" id="limit" class="form-control" value="{{ limit }}" min="1" max="1000">
+            <input type="number" name="limit" id="limit" class="form-control" value="{{ limit }}" min="1" max="2000">
         </div>
         <div class="col-md-2">
             <button type="submit" class="btn btn-primary w-100">Fetch Klines</button>
         </div>
     </form>
 
-    {% if klines_data %}
+    {% if selected_symbol_id and klines_data %}
+    <div class="chart-container mb-4">
+        <canvas id="klineChart"></canvas>
+    </div>
     <p class="mt-3">Showing {{ klines_data|length }} of max {{ limit }} klines for <strong>{{ current_view_info.label }}</strong>.</p>
     <div class="table-responsive">
-        <!-- ... klines table remains the same ... -->
         <table class="table table-striped table-hover table-sm">
             <thead class="table-dark">
                 <tr>
@@ -126,16 +127,159 @@
                     <td>{{ "%.8f"|format(kline.low_price|float) }}</td>
                     <td>{{ "%.8f"|format(kline.close_price|float) }}</td>
                     <td>{{ "%.2f"|format(kline.volume|float) }}</td>
-                    <td>{{ kline.number_of_trades }}</td>
+                    <td>{{ "{:,}".format(kline.number_of_trades) if kline.number_of_trades is not none else 'N/A' }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
-    {% elif request.args.get('symbol_id') and not query_error %}
-        {# Flash messages already handle "no klines found" or "aggregate populating" #}
-    {% elif not symbols and not selected_symbol_id %}
-         {# Flash message "No symbols found..." handles this #}
+    {% elif selected_symbol_id and not klines_data and not query_error %}
+        {# "No klines data found" flash message is shown by Python logic if applicable #}
+        <div class="alert alert-info mt-3">
+            No kline data to display for the current selection. The continuous aggregate might still be populating or no data exists for this range.
+        </div>
+        <div class="chart-container mb-4" style="border: 1px dashed #ccc; display: flex; align-items: center; justify-content: center;">
+            <p class="text-muted">No data to plot.</p>
+        </div>
+    {% elif not symbols %}
+         {# Flash message "No symbols found..." handles this from Python #}
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/fns.min.js"></script> <!-- date-fns itself -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@2.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const chartDataJson = '{{ chart_data_json|safe if chart_data_json else "{}" }}';
+        let klineChartData;
+        try {
+            klineChartData = JSON.parse(chartDataJson);
+        } catch (e) {
+            console.error("Error parsing chart data:", e);
+            klineChartData = null;
+        }
+        
+        const klineChartCanvas = document.getElementById('klineChart');
+
+        if (klineChartCanvas && klineChartData && klineChartData.labels && klineChartData.labels.length > 0) {
+            // Data is already reversed in Python for chronological display
+            const ctx = klineChartCanvas.getContext('2d');
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: klineChartData.labels, // These are ISO strings
+                    datasets: [
+                        {
+                            label: 'Close Price',
+                            data: klineChartData.close_prices,
+                            borderColor: 'rgb(75, 192, 192)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            tension: 0.1,
+                            yAxisID: 'yPrice',
+                            pointRadius: 1, // Smaller points
+                            pointHoverRadius: 3
+                        },
+                        {
+                            label: 'Volume',
+                            data: klineChartData.volumes,
+                            backgroundColor: 'rgba(153, 102, 255, 0.3)',
+                            borderColor: 'rgb(153, 102, 255)',
+                            type: 'bar',
+                            yAxisID: 'yVolume'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                tooltipFormat: 'MMM dd, yyyy HH:mm:ss', // Display seconds in tooltip
+                                displayFormats: { // Control how different time units are displayed on the axis
+                                    millisecond: 'HH:mm:ss.SSS',
+                                    second: 'HH:mm:ss',
+                                    minute: 'HH:mm',
+                                    hour: 'HH:00',
+                                    day: 'MMM dd',
+                                    week: 'MMM dd',
+                                    month: 'MMM yyyy',
+                                    quarter: 'qqq yyyy',
+                                    year: 'yyyy'
+                                }
+                            },
+                            ticks: {
+                                autoSkip: true,
+                                maxTicksLimit: 15, // Adjust for density
+                                source: 'auto' // 'auto' or 'data'
+                            },
+                            title: { display: true, text: 'Time (UTC)' }
+                        },
+                        yPrice: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: { display: true, text: 'Price' },
+                            ticks: {
+                                callback: function(value, index, values) {
+                                    return value.toFixed(4); // Adjust precision as needed
+                                }
+                            }
+                        },
+                        yVolume: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: { display: true, text: 'Volume' },
+                            grid: { drawOnChartArea: false },
+                             ticks: {
+                                callback: function(value, index, values) {
+                                    if (value >= 1e6) return (value / 1e6).toFixed(1) + 'M';
+                                    if (value >= 1e3) return (value / 1e3).toFixed(1) + 'K';
+                                    return value.toFixed(0);
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: { 
+                            mode: 'index', 
+                            intersect: false,
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                     // tooltipItems[0] is the first dataset item under the cursor
+                                    if (tooltipItems.length > 0) {
+                                        const date = new Date(tooltipItems[0].parsed.x);
+                                        return date.toISOString().replace('T', ' ').substring(0,19) + ' UTC';
+                                    }
+                                    return '';
+                                }
+                            }
+                        },
+                        legend: { display: true, position: 'top' }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    }
+                }
+            });
+        } else if (klineChartCanvas) {
+            const ctx = klineChartCanvas.getContext('2d');
+            ctx.clearRect(0, 0, klineChartCanvas.width, klineChartCanvas.height);
+            ctx.font = "16px Arial";
+            ctx.fillStyle = "#888";
+            ctx.textAlign = 'center';
+            ctx.fillText('No data to plot for the current selection.', klineChartCanvas.width / 2, klineChartCanvas.height / 2);
+        }
+    });
+</script>
 {% endblock %}

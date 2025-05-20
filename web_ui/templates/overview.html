@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}Dataset Overview - Deep Alpha System{% endblock %}
+
+{% block content %}
+<div class="bg-light p-4 p-md-5 rounded">
+    <h1 class="mb-4">Dataset Overview</h1>
+
+    <!-- Existing summary cards -->
+    <div class="row">
+        <div class="col-md-4">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Symbols</h5>
+                </div>
+                <div class="card-body">
+                    <p class="card-text fs-4">Total Unique Symbols: <strong>{{ "{:,}".format(overview_stats.total_symbols) if overview_stats.total_symbols is not none else 'N/A' }}</strong></p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-8">
+             <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">Order Book Snapshots</h5>
+                </div>
+                <div class="card-body">
+                    <p class="card-text fs-5">Total Snapshots: <strong>{{ "{:,}".format(overview_stats.order_book_stats.count) if overview_stats.order_book_stats.count is not none else 'N/A' }}</strong></p>
+                    {% if overview_stats.order_book_stats.count > 0 %}
+                    <p class="card-text small text-muted">
+                        From: {{ overview_stats.order_book_stats.min_time.strftime('%Y-%m-%d %H:%M:%S UTC') if overview_stats.order_book_stats.min_time else 'N/A' }}<br>
+                        To: {{ overview_stats.order_book_stats.max_time.strftime('%Y-%m-%d %H:%M:%S UTC') if overview_stats.order_book_stats.max_time else 'N/A' }}
+                    </p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">Klines Data by Interval</h5>
+        </div>
+        <div class="card-body">
+            {% if overview_stats.kline_stats_by_interval %}
+            <div class="table-responsive">
+                <table class="table table-striped table-hover table-sm">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Interval</th>
+                            <th>Total Klines</th>
+                            <th>Earliest Data (UTC)</th>
+                            <th>Latest Data (UTC)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for interval_key, stats_item in overview_stats.kline_stats_by_interval.items() %}
+                        <tr>
+                            <td>{{ stats_item.label }}</td>
+                            <td>{{ "{:,}".format(stats_item.count) if stats_item.count != 'Error' and stats_item.count is not none else stats_item.count }}</td>
+                            <td>{{ stats_item.min_time.strftime('%Y-%m-%d %H:%M:%S') if stats_item.min_time else 'N/A' }}</td>
+                            <td>{{ stats_item.max_time.strftime('%Y-%m-%d %H:%M:%S') if stats_item.max_time else 'N/A' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p>No kline statistics available.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- New Charts Section -->
+    <h2 class="mt-5 mb-3">Data Distribution Charts</h2>
+    <div class="row">
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Symbols by Quote Asset</h5></div>
+                <div class="card-body">
+                    <div class="chart-container" style="height: 350px;">
+                        <canvas id="quoteAssetChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Top 10 Symbols by 1m Kline Count</h5></div>
+                <div class="card-body">
+                     <div class="chart-container" style="height: 350px;">
+                        <canvas id="topSymbolsKlinesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="row">
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Daily 1m Klines Ingested (Last 30 Days)</h5></div>
+                <div class="card-body">
+                     <div class="chart-container" style="height: 350px;">
+                        <canvas id="dailyKlinesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Daily Order Book Snapshots Ingested (Last 30 Days)</h5></div>
+                <div class="card-body">
+                     <div class="chart-container" style="height: 350px;">
+                        <canvas id="dailySnapshotsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/fns.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@2.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    // Helper to display message on canvas if no data
+    function showNoDataMessage(canvasId, message = 'No data available to display.') {
+        const canvas = document.getElementById(canvasId);
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous drawing
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#888';
+            ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+        }
+    }
+
+    // Default Colors for Charts
+    const CHART_COLORS = [
+        'rgba(255, 99, 132, 0.7)', 'rgba(54, 162, 235, 0.7)', 'rgba(255, 206, 86, 0.7)',
+        'rgba(75, 192, 192, 0.7)', 'rgba(153, 102, 255, 0.7)', 'rgba(255, 159, 64, 0.7)',
+        'rgba(201, 203, 207, 0.7)', 'rgba(83, 102, 252, 0.7)', 'rgba(23, 202, 42, 0.7)', 'rgba(253, 52, 182, 0.7)'
+    ];
+    const CHART_BORDER_COLORS = CHART_COLORS.map(color => color.replace('0.7', '1'));
+
+
+    // 1. Quote Asset Distribution Chart (Pie)
+    try {
+        const quoteAssetDataJson = '{{ plot_data.quote_asset_dist_json | safe }}';
+        const quoteAssetData = JSON.parse(quoteAssetDataJson);
+        const quoteAssetChartCtx = document.getElementById('quoteAssetChart');
+        if (quoteAssetChartCtx && quoteAssetData.labels && quoteAssetData.labels.length > 0) {
+            new Chart(quoteAssetChartCtx, {
+                type: 'pie',
+                data: {
+                    labels: quoteAssetData.labels,
+                    datasets: [{
+                        label: 'Symbols by Quote Asset',
+                        data: quoteAssetData.data,
+                        backgroundColor: CHART_COLORS,
+                        borderColor: CHART_BORDER_COLORS,
+                        borderWidth: 1
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+            });
+        } else { showNoDataMessage('quoteAssetChart'); }
+    } catch (e) { console.error("Error rendering Quote Asset Chart:", e); showNoDataMessage('quoteAssetChart', 'Error loading chart.'); }
+
+    // 2. Top Symbols by Klines Chart (Horizontal Bar)
+    try {
+        const topSymbolsDataJson = '{{ plot_data.top_symbols_klines_json | safe }}';
+        const topSymbolsData = JSON.parse(topSymbolsDataJson);
+        const topSymbolsKlinesChartCtx = document.getElementById('topSymbolsKlinesChart');
+        if (topSymbolsKlinesChartCtx && topSymbolsData.labels && topSymbolsData.labels.length > 0) {
+            new Chart(topSymbolsKlinesChartCtx, {
+                type: 'bar',
+                data: {
+                    labels: topSymbolsData.labels,
+                    datasets: [{
+                        label: '1m Kline Count',
+                        data: topSymbolsData.data,
+                        backgroundColor: CHART_COLORS[3], // Teal
+                        borderColor: CHART_BORDER_COLORS[3],
+                        borderWidth: 1
+                    }]
+                },
+                options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
+            });
+        } else { showNoDataMessage('topSymbolsKlinesChart'); }
+    } catch (e) { console.error("Error rendering Top Symbols Klines Chart:", e); showNoDataMessage('topSymbolsKlinesChart', 'Error loading chart.');}
+
+    // 3. Daily Klines Ingested Chart (Line)
+    try {
+        const dailyKlinesDataJson = '{{ plot_data.daily_klines_ingested_json | safe }}';
+        const dailyKlinesData = JSON.parse(dailyKlinesDataJson);
+        const dailyKlinesChartCtx = document.getElementById('dailyKlinesChart');
+        if (dailyKlinesChartCtx && dailyKlinesData.labels && dailyKlinesData.labels.length > 0) {
+            new Chart(dailyKlinesChartCtx, {
+                type: 'line',
+                data: {
+                    labels: dailyKlinesData.labels, // These are date strings
+                    datasets: [{
+                        label: '1m Klines Ingested',
+                        data: dailyKlinesData.data,
+                        fill: true,
+                        borderColor: CHART_COLORS[1], // Blue
+                        backgroundColor: CHART_COLORS[1].replace('0.7', '0.2'),
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy' }, title: { display: false } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Count' } }
+                    }
+                }
+            });
+        } else { showNoDataMessage('dailyKlinesChart'); }
+    } catch (e) { console.error("Error rendering Daily Klines Chart:", e); showNoDataMessage('dailyKlinesChart', 'Error loading chart.');}
+
+    // 4. Daily Order Book Snapshots Ingested Chart (Line)
+    try {
+        const dailySnapshotsDataJson = '{{ plot_data.daily_snapshots_ingested_json | safe }}';
+        const dailySnapshotsData = JSON.parse(dailySnapshotsDataJson);
+        const dailySnapshotsChartCtx = document.getElementById('dailySnapshotsChart');
+        if (dailySnapshotsChartCtx && dailySnapshotsData.labels && dailySnapshotsData.labels.length > 0) {
+            new Chart(dailySnapshotsChartCtx, {
+                type: 'line',
+                data: {
+                    labels: dailySnapshotsData.labels, // Date strings
+                    datasets: [{
+                        label: 'Snapshots Ingested',
+                        data: dailySnapshotsData.data,
+                        fill: true,
+                        borderColor: CHART_COLORS[4], // Purple
+                        backgroundColor: CHART_COLORS[4].replace('0.7', '0.2'),
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy' }, title: { display: false } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Count' } }
+                    }
+                }
+            });
+        } else { showNoDataMessage('dailySnapshotsChart'); }
+    } catch (e) { console.error("Error rendering Daily Snapshots Chart:", e); showNoDataMessage('dailySnapshotsChart', 'Error loading chart.');}
+});
+</script>
+{% endblock %}
