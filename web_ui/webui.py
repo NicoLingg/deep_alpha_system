@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_httpauth import HTTPBasicAuth
 import psycopg2
 from psycopg2.extras import DictCursor
 import configparser
@@ -6,7 +7,7 @@ import os
 from datetime import datetime, timedelta
 import json
 
-# --- Configuration (remains the same) ---
+# --- Configuration ---
 PROJECT_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_FILE = os.path.join(PROJECT_ROOT_DIR, "config", "config.ini")
 
@@ -25,6 +26,41 @@ config.read(CONFIG_FILE)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+auth = HTTPBasicAuth()
+
+# --- Load WebUI Authentication Credentials ---
+auth_enabled = False
+WEBUI_USERNAME = None
+WEBUI_PASSWORD = None
+
+if (
+    "webui_auth" in config
+    and "username" in config["webui_auth"]
+    and "password" in config["webui_auth"]
+):
+    WEBUI_USERNAME = config["webui_auth"].get("username")
+    WEBUI_PASSWORD = config["webui_auth"].get("password")
+    if WEBUI_USERNAME and WEBUI_PASSWORD:
+        auth_enabled = True
+        app.logger.info("WebUI authentication enabled.")
+    else:
+        app.logger.warning(
+            "WebUI username/password in config.ini are empty. Authentication disabled."
+        )
+else:
+    app.logger.info(
+        "WebUI authentication section not found or incomplete in config.ini. Authentication disabled."
+    )
+
+
+# --- Password Verification Callback ---
+@auth.verify_password
+def verify_password(username, password):
+    if auth_enabled:
+        if username == WEBUI_USERNAME and password == WEBUI_PASSWORD:
+            return username
+        return None
+    return "anonymous"  # Auth not enabled, allow access without credentials
 
 
 # --- Database Connection Helper (remains the same) ---
@@ -223,11 +259,13 @@ def get_order_book_stats_for_symbol(symbol_id):
 
 # --- Routes ---
 @app.route("/")
+@auth.login_required  # Protect this route
 def index():
     return redirect(url_for("view_klines"))
 
 
 @app.route("/klines", methods=["GET"])
+@auth.login_required  # Protect this route
 def view_klines():
     symbols = get_all_symbols_from_db()
     selected_symbol_id = request.args.get("symbol_id", type=int)
@@ -273,7 +311,6 @@ def view_klines():
         )
         selected_interval_key = default_interval_key
 
-    # ... (rest of the kline fetching logic from previous version - no changes needed here) ...
     default_end_dt = datetime.utcnow()
     if selected_interval_key in ["1d", "1w", "1M"]:
         default_start_dt = default_end_dt - timedelta(days=90)
@@ -380,6 +417,7 @@ def view_klines():
 
 
 @app.route("/order-book", methods=["GET"])
+@auth.login_required  # Protect this route
 def view_order_book():
     symbols = get_all_symbols_from_db()
     selected_symbol_id = request.args.get("symbol_id", type=int)
