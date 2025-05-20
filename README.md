@@ -178,6 +178,8 @@ make webui
 ```
 Once running, you can access the UI in your browser, typically at `http://localhost:5001` or `http://0.0.0.0:5001`.
 
+![alt text](assets/data_viewer.png)
+
 ### Database Management
 
 Common Makefile targets for managing the database:
