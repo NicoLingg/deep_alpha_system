@@ -9,7 +9,7 @@ DB_NAME = deep_alpha_data_db
 # Default symbol and interval for single kline fetch (legacy)
 DEFAULT_SYMBOL = BTCUSDT
 DEFAULT_KLINE_INTERVAL = 1m
-DEFAULT_START_DATE = 2025-01-01
+DEFAULT_START_DATE = 2017-01-01
 
 
 # --- Vars for Stage 1: Update Symbol Definitions ---
@@ -28,9 +28,26 @@ KLINE_FETCH_API_STATUS_FILTER = # Uses config: symbol_management.default_kline_f
 KLINE_FETCH_MAX_WORKERS = # Uses config: ingestion.max_workers
 KLINE_FETCH_WORKER_DELAY = # Uses config: ingestion.worker_symbol_delay
 
+# --- Vars for Cleanup ---
+DELETE_FEATURE_SET_VERSION = # REQUIRED: The version part of the feature table to delete (e.g., v1_basic)
+
+# --- Vars for Feature Engineering (Updated) ---
+FEATURE_SET_VERSION = # REQUIRED: e.g., v1_basic, v2_talib_exp (used for DB table name)
+FEATURE_SET_FILE = # Optional: Name or path of the YAML feature set definition file (e.g., 'default_v1' for feature_sets/default_v1.yaml, or a full path like 'feature_sets/custom.yaml'). Defaults to 'feature_sets/default.yaml' if not provided.
+FEATURE_SYMBOLS =
+FEATURE_INTERVALS = # Optional: Comma-separated list. If not provided, uses 'default_base_intervals_to_process' from the loaded YAML feature set.
+FEATURE_START_DATE = # Optional YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+FEATURE_END_DATE = # Optional
+FEATURE_RECALCULATE_ALL = # Set to "true" or "yes" to trigger --recalculate-all
+FEATURE_LOOKBACK_INITIAL = # Optional: default in script is 365
+FEATURE_KLINE_BUFFER_BACKWARD = # Optional: default in script (e.g., 250). For --kline-buffer-backward-periods
+FEATURE_MAX_FUTURE_HORIZON_BUFFER = # Optional: default in script (e.g., 10). For --max-future-horizon-buffer-periods
+
+
 .PHONY: all help build up down logs restart status db-shell init-db setup-db \
-        update-symbol-definitions fetch-klines-from-db fetch-single-kline \
-        collect-orderbook-snapshots refresh-aggregates webui clean clean-db-data
+        update-symbol-definitions fetch-klines-from-db fetch-single-kline calculate-features \
+        collect-orderbook-snapshots refresh-aggregates webui clean clean-db-data delete-feature-table list-feature-sets \
+        refresh-custom-mvs refresh-all-data-views
 
 all: help
 
@@ -45,12 +62,20 @@ help:
 	@echo "                              Vars: KLINE_FETCH_DB_QUOTE_ASSET, KLINE_FETCH_DB_INSTRUMENT_LIKE, KLINE_FETCH_DB_SYMBOLS_LIST,"
 	@echo "                                    KLINE_FETCH_START_DATE, KLINE_FETCH_END_DATE, KLINE_FETCH_INTERVAL,"
 	@echo "                                    KLINE_FETCH_API_STATUS_FILTER, KLINE_FETCH_MAX_WORKERS, KLINE_FETCH_WORKER_DELAY"
+	@echo "  calculate-features          Stage 3: Calculate features from kline data using a YAML feature set definition."
+	@echo "                              Vars: FEATURE_SET_VERSION (required for DB table name),"
+	@echo "                                    FEATURE_SET_FILE (optional YAML, e.g., 'my_set' for feature_sets/my_set.yaml, defaults to feature_sets/default.yaml),"
+	@echo "                                    FEATURE_SYMBOLS, FEATURE_INTERVALS (overrides YAML defaults),"
+	@echo "                                    FEATURE_START_DATE, FEATURE_END_DATE, FEATURE_RECALCULATE_ALL,"
+	@echo "                                    FEATURE_LOOKBACK_INITIAL, FEATURE_KLINE_BUFFER_BACKWARD, FEATURE_MAX_FUTURE_HORIZON_BUFFER"
 	@echo ""
 	@echo "Other Data Targets:"
 	@echo "  fetch-single-kline          (Legacy) Fetch klines for a single specified symbol."
 	@echo "                              Vars: SYMBOL, START_DATE, END_DATE, INTERVAL, BASE_ASSET, QUOTE_ASSET"
 	@echo "  collect-orderbook-snapshots Start collecting order book snapshots."
 	@echo "  refresh-aggregates          Manually refresh TimescaleDB continuous aggregates."
+	@echo "  refresh-custom-mvs          Manually refresh custom materialized views for overview."
+	@echo "  refresh-all-data-views      Refresh both CAGGs and custom MVs."
 	@echo ""
 	@echo "Service Targets:"
 	@echo "  up                          Start database container."
@@ -65,9 +90,14 @@ help:
 	@echo "Cleanup Targets:"
 	@echo "  clean                       Remove Python bytecode and __pycache__."
 	@echo "  clean-db-data               WARNING: Stops container and removes database data volume."
+	@echo "  delete-feature-table        Deletes a specified kline_features_* table."
+	@echo "                              Vars: DELETE_FEATURE_SET_VERSION (required)"
+	@echo "  list-feature-sets           Lists all kline_features_* tables in the database."
 	@echo ""
 	@echo "Example Stage 1: make update-symbol-definitions SYM_STATUSES=\"TRADING,BREAK\" SYM_PERMISSIONS=\"SPOT\""
 	@echo "Example Stage 2: make fetch-klines-from-db KLINE_FETCH_DB_QUOTE_ASSET=USDT KLINE_FETCH_START_DATE=\"2022-01-01\""
+	@echo "Example Stage 3 (using default YAML feature set): make calculate-features FEATURE_SET_VERSION=v1_default_yaml FEATURE_SYMBOLS=BTCUSDT"
+	@echo "Example Stage 3 (using specific YAML): make calculate-features FEATURE_SET_VERSION=v2_custom FEATURE_SET_FILE=my_custom_features FEATURE_SYMBOLS=ETHUSDT"
 
 # --- Core Workflow Targets ---
 setup-db: up init-db
@@ -76,7 +106,7 @@ update-symbol-definitions: up
 	@echo "Starting Stage 1: Updating symbol definitions in local DB from Binance API..."
 	$(PYTHON) -m data_ingestion.manage_symbols --config $(CONFIG_FILE_PATH) \
 		$(if $(SYM_STATUSES),--include-statuses "$(SYM_STATUSES)",) \
-		$(if $(SYM_PERMISSIONS_HINT),--include-permissions-hint "$(SYM_PERMISSIONS_HINT)",) \
+		$(if $(SYM_PERMISSIONS),--include-permissions "$(SYM_PERMISSIONS)",) \
 		$(if $(SYM_QUOTE_ASSET),--quote-asset-filter $(SYM_QUOTE_ASSET),)
 
 fetch-klines-from-db: up
@@ -91,6 +121,32 @@ fetch-klines-from-db: up
 		$(if $(KLINE_FETCH_API_STATUS_FILTER),--api-status-filter $(KLINE_FETCH_API_STATUS_FILTER),) \
 		$(if $(KLINE_FETCH_MAX_WORKERS),--max-workers $(KLINE_FETCH_MAX_WORKERS),) \
 		$(if $(KLINE_FETCH_WORKER_DELAY),--worker-delay $(KLINE_FETCH_WORKER_DELAY),)
+
+# --- Feature Calculation Target (Updated) ---
+calculate-features: up
+	@if [ -z "$(FEATURE_SET_VERSION)" ]; then \
+		echo "ERROR: FEATURE_SET_VERSION is required. Example: make calculate-features FEATURE_SET_VERSION=v1_initial"; \
+		exit 1; \
+	fi
+	@echo "Starting feature calculation for set version (table suffix): $(FEATURE_SET_VERSION)..."
+	@if [ -n "$(FEATURE_SET_FILE)" ]; then \
+		echo "Using feature set definition file: $(FEATURE_SET_FILE).yaml (or path if absolute)"; \
+	else \
+		echo "Using default feature set definition (feature_sets/default.yaml)"; \
+	fi
+	PYTHONPATH=. $(PYTHON) -m feature_engineering.generator \
+		--app-config $(CONFIG_FILE_PATH) \
+		--feature-set-version "$(FEATURE_SET_VERSION)" \
+		$(if $(FEATURE_SET_FILE),--feature-set-file "$(FEATURE_SET_FILE)",) \
+		$(if $(FEATURE_SYMBOLS),--symbols "$(FEATURE_SYMBOLS)",) \
+		$(if $(FEATURE_INTERVALS),--intervals "$(FEATURE_INTERVALS)",) \
+		$(if $(FEATURE_START_DATE),--start-date "$(FEATURE_START_DATE)",) \
+		$(if $(FEATURE_END_DATE),--end-date "$(FEATURE_END_DATE)",) \
+		$(if $(filter $(FEATURE_RECALCULATE_ALL),true yes True Yes YES),--recalculate-all,) \
+		$(if $(FEATURE_LOOKBACK_INITIAL),--lookback-days-initial $(FEATURE_LOOKBACK_INITIAL),) \
+		$(if $(FEATURE_KLINE_BUFFER_BACKWARD),--kline-buffer-backward-periods $(FEATURE_KLINE_BUFFER_BACKWARD),) \
+		$(if $(FEATURE_MAX_FUTURE_HORIZON_BUFFER),--max-future-horizon-buffer-periods $(FEATURE_MAX_FUTURE_HORIZON_BUFFER),)
+
 
 # --- Legacy/Single Kline Fetch ---
 SYMBOL = $(DEFAULT_SYMBOL)
@@ -183,6 +239,39 @@ refresh-custom-mvs: up
 
 refresh-all-data-views: refresh-aggregates refresh-custom-mvs
 
+delete-feature-table: up
+	@if [ -z "$(DELETE_FEATURE_SET_VERSION)" ]; then \
+		echo "ERROR: DELETE_FEATURE_SET_VERSION is required. Example: make delete-feature-table DELETE_FEATURE_SET_VERSION=v1_old_experiment"; \
+		exit 1; \
+	fi
+	$(eval VERSION_SANITIZED := $(shell echo "$(DELETE_FEATURE_SET_VERSION)" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g' | sed 's/\./_/g'))
+	$(eval TABLE_TO_DELETE := kline_features_$(VERSION_SANITIZED))
+	@echo "Attempting to delete feature table: $(TABLE_TO_DELETE) from database $(DB_NAME)...";
+	@bash -c '\
+		table_to_delete_arg="$${1}"; \
+		container_db_name_arg="$${2}"; \
+		db_user_arg="$${3}"; \
+		db_name_arg="$${4}"; \
+		read -r -p "Are you SURE you want to PERMANENTLY DELETE table '\''$$table_to_delete_arg'\''? (y/N) " choice; \
+		if [[ "$$choice" == [yY] || "$$choice" == [yY][eE][sS] ]]; then \
+			echo "Deleting table $$table_to_delete_arg..."; \
+			docker exec "$$container_db_name_arg" psql -U "$$db_user_arg" -d "$$db_name_arg" -c "DROP TABLE IF EXISTS \"$$table_to_delete_arg\" CASCADE;"; \
+			echo "Table $$table_to_delete_arg deleted (if it existed)."; \
+		else \
+			echo "Operation cancelled. Table $$table_to_delete_arg was NOT deleted."; \
+		fi \
+	' bash "$(TABLE_TO_DELETE)" "$(CONTAINER_DB_NAME)" "$(DB_USER)" "$(DB_NAME)"
+
+list-feature-sets: up
+	@echo "Listing all kline feature set tables from database $(DB_NAME)..."
+	@echo "----------------------------------------------------------------"
+	@docker exec $(CONTAINER_DB_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "\
+	SELECT tablename \
+	FROM pg_tables \
+	WHERE schemaname = 'public' AND tablename LIKE 'kline_features_%' \
+	ORDER BY tablename;"
+	@echo "----------------------------------------------------------------"
+	@echo "Done."
 
 # --- Web UI Target ---
 webui:

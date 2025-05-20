@@ -40,6 +40,34 @@ The system is designed to:
 *   **Dockerized Database:**
     *   TimescaleDB runs in a Docker container for easy setup and portability.
 
+## Feature Engineering System
+
+The system includes a modular and configurable pipeline for generating financial features from kline data. This is crucial for preparing data for machine learning models or advanced technical analysis.
+
+*   **Architecture:**
+    *   **YAML Configuration (`feature_engineering/feature_sets/*.yaml`):** Users define "feature sets" by selecting and parameterizing feature calculators in simple YAML files. This declarative approach makes it easy to experiment with different feature combinations.
+    *   **Calculator Catalog (`feature_engineering/calculators/catalog.py`):** A central Python registry mapping user-friendly names (e.g., "EMA", "RSI") to their underlying Python calculator classes. This acts as a discoverable "menu" of available feature types.
+    *   **Abstract Base Classes (`feature_engineering/calculators/base_calculator.py`):**
+        *   `BackwardFeatureCalculator`: For features derived from historical data up to the current point (e.g., moving averages, MACD).
+        *   `ForwardFeatureCalculator`: For features that look into the future from the current point (e.g., forward returns, future volatility).
+    *   **Concrete Calculator Implementations (`feature_engineering/calculators/*.py`):** Python classes that inherit from the ABCs and contain the specific logic for calculating each feature (e.g., `EmaFeatureCalculator`, `ForwardLogReturnCalculator`).
+    *   **Orchestration (`feature_engineering/generator.py`):** A script that reads a YAML feature set, uses the catalog to instantiate the necessary calculators, manages data flow, and stores the computed features in a dedicated database table (e.g., `kline_features_<your_set_version>`).
+
+*   **Key Capabilities:**
+    *   Dynamic schema generation for feature tables based on selected calculators.
+    *   Support for both backward-looking technical indicators and forward-looking target variables.
+    *   Clear separation between feature definition (YAML) and implementation (Python).
+    *   Extensible design for adding new custom feature calculators.
+
+*   **Usage (via Makefile):**
+    The `calculate-features` Makefile target orchestrates this process.
+    ```bash
+    # Example: Calculate features using 'my_feature_set.yaml' for table version 'v1_exp'
+    make calculate-features FEATURE_SET_VERSION=v1_exp FEATURE_SET_FILE=my_feature_set
+    ```
+    For detailed instructions on adding new calculators and configuring feature sets, please refer to `feature_engineering/README.md`.
+
+
 ## Project Structure (Overview)
 
 *   `config/`: Contains configuration files (e.g., `config.ini`).
@@ -51,10 +79,20 @@ The system is designed to:
     *   `utils.py`: Shared utility functions.
     *   `symbol_utils.py`: Utilities like finding top liquid symbols.
 *   `db/`: SQL schema definitions (`schema.sql`), including tables, hypertables, continuous aggregates, and materialized views.
+*   `feature_engineering/`: Python scripts and configuration for calculating financial features.
+    *   `generator.py`: Main script to orchestrate feature calculation.
+    *   `calculators/`: Directory containing feature calculator implementations.
+        *   `base_calculator.py`: Abstract Base Classes for calculators.
+        *   `catalog.py`: Registry of available calculator types.
+        *   `technical_indicators.py`, `volume_features.py`, etc.: Concrete calculator classes.
+    *   `feature_sets/`: Directory for YAML files defining specific feature sets (e.g., `default.yaml`).
+    *   `utils.py`: Utilities for loading feature set configurations.
+    *   `README.md`: Detailed guide for the feature engineering subsystem.
 *   `web_ui/`: Flask application for the web interface.
 *   `Makefile`: For automating common tasks.
 *   `docker-compose.yml`: Defines the TimescaleDB service.
 *   `requirements.txt`: Python dependencies.
+*   `assets/`: Images and other static assets for documentation.
 
 
 ## Prerequisites

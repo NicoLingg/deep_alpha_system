@@ -1,0 +1,123 @@
+# Example feature set definition using YAML
+
+# General settings for this feature set
+default_base_intervals_to_process: ["1m", "5m", "1h"]
+
+# Backward-looking features to calculate
+# Each key is a unique block_name for this instance of calculation.
+# This block_name will be used as the output_prefix if 'output_prefix' is not specified in 'config'.
+backward_features:
+  logret_close_standard:
+    calculator: "LogReturns" # Name from BACKWARD_CALCULATOR_CATALOG
+    params: # Overrides default parameters of the cataloged calculator if needed
+      input_field: "close_price"
+      windows: [1, 2, 3, 5, 10, 20, 40, 60]
+      add_base_return: true
+    # output_prefix: "logret_close" # Optional: if not provided, 'logret_close_standard' is used
+
+  ema_close_common:
+    calculator: "EMA"
+    params:
+      input_field: "close_price"
+      periods: [9, 12, 21, 26, 50, 100, 200]
+    # output_prefix: "ema_close"
+
+  ema_logret_momentum:
+    calculator: "EMA"
+    params:
+      input_field: "logret_close_standard_base_log_return_base" # Depends on output from 'logret_close_standard'
+      periods: [10, 21, 50]
+    # output_prefix: "mom_ema_logret"
+
+  vol_std_logret_base:
+    calculator: "RollingStd"
+    params:
+      input_field: "logret_close_standard_base_log_return_base"
+      periods: [20, 50, 100]
+    # output_prefix: "vol_std_logret"
+
+  rsi_close_variants:
+    calculator: "RSI"
+    params:
+      input_field: "close_price"
+      talib_periods: [7, 14, 21]
+    # output_prefix: "rsi_close"
+
+  macd_close_default:
+    calculator: "MACD"
+    params:
+      input_field: "close_price"
+    # output_prefix: "macd_close"
+
+  atr_hlc_default:
+    calculator: "ATR"
+    # params: Uses defaults from catalog for input_fields and talib_periods (e.g. [14])
+    # output_prefix: "atr_hlc"
+
+  bbands_close_default:
+    calculator: "BBands"
+    params:
+      input_field: "close_price"
+    # output_prefix: "bbands_close"
+
+  volume_sum_base:
+    calculator: "RollingSum"
+    params:
+      input_field: "volume"
+      periods: [10, 20, 50]
+    # output_prefix: "vol_sum"
+
+  qvol_sum_base:
+    calculator: "RollingSum"
+    params:
+      input_field: "quote_asset_volume"
+      periods: [10, 20, 50]
+    # output_prefix: "qvol_sum"
+
+  obv_default:
+    calculator: "OBV"
+    # output_prefix: "obv"
+
+# Forward-looking horizon-based metrics
+# Structure: base_interval: { horizons: [], metrics: [ {calculator, metric_type (optional), params} ] }
+forward_features:
+  "1m":
+    horizons: ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h"]
+    metrics:
+      - calculator: "ForwardLogReturn" # Name from FORWARD_CALCULATOR_CATALOG
+        # metric_type: "logret" # Optional: if not here, will try to get from catalog's default_metric_type
+        params:
+          input_field: "close_price"
+      - calculator: "ForwardVolatility"
+        # metric_type: "vol"
+        params:
+          input_field: "close_price"
+          use_existing_log_returns_col: false
+
+  "5m":
+    horizons: ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "5d"]
+    metrics:
+      - calculator: "ForwardLogReturn"
+        params: { input_field: "close_price" }
+      - calculator: "ForwardVolatility"
+        params: { input_field: "close_price", use_existing_log_returns_col: false }
+
+  "10m":
+    horizons: ["30m", "1h", "2h", "4h", "6h", "12h", "1d", "2d"]
+    metrics:
+      - calculator: "ForwardLogReturn"
+        params: { input_field: "close_price" }
+
+  "1h":
+    horizons: ["1h", "2h", "4h", "6h", "12h", "1d", "2d", "3d", "7d"]
+    metrics:
+      - calculator: "ForwardLogReturn"
+        params: { input_field: "close_price" }
+      - calculator: "ForwardVolatility"
+        params: { input_field: "close_price", use_existing_log_returns_col: false }
+
+  "4h":
+    horizons: ["8h", "12h", "1d", "2d", "3d", "7d", "14d"]
+    metrics:
+      - calculator: "ForwardLogReturn"
+        params: { input_field: "close_price" }

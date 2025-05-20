@@ -5,3 +5,7 @@ flask
 werkzeug==2.0.1
 Flask-HTTPAuth
 tqdm
+TA-Lib
+numpy
+matplotlib
+SQLAlchemy
