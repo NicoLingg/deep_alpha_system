@@ -1,8 +1,11 @@
 import time
+import asyncio
 import argparse
 import psycopg2
-from tqdm import tqdm
+import threading
 import concurrent.futures
+
+from tqdm import tqdm
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
@@ -129,9 +132,20 @@ def kline_fetch_worker(
     instrument_name = symbol_data["instrument_name"]
     symbol_id = symbol_data["symbol_id"]
 
+    try:
+        current_loop = asyncio.get_event_loop()
+        if (
+            current_loop.is_closed()
+        ):  
+            raise RuntimeError("Event loop is closed")
+    except (
+        RuntimeError
+    ) as e:  
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+
     worker_b_client = None
     worker_db_conn = None
-    # Short status for tqdm postfix
     tqdm_status_postfix = {"symbol": instrument_name, "status": "INIT"}
 
     try:
@@ -161,8 +175,7 @@ def kline_fetch_worker(
                 ]
                 check_default_trading_spot = False
             elif api_status_filter_config_str == "TRADING_SPOT_ONLY":
-                pass  # Defaults are fine
-            # No else needed as default is TRADING_SPOT_ONLY from config or CLI
+                pass
 
             is_allowed = check_live_api_status(
                 worker_b_client,
@@ -176,8 +189,6 @@ def kline_fetch_worker(
 
         if proceed_with_fetch:
             tqdm_status_postfix["status"] = "FETCHING"
-            # fetch_and_store_historical_klines now has its own internal tqdm for download progress
-            # and prints its own summary for that symbol.
             count = fetch_and_store_historical_klines(
                 worker_b_client,
                 worker_db_conn,
@@ -195,21 +206,26 @@ def kline_fetch_worker(
 
     except Exception as e:
         # Print concise error for the worker, more details can be logged if using logging module
+        # Added thread name for better debugging context.
         print(
-            f"\n!!! ERROR in kline worker for {instrument_name}: {type(e).__name__} - {e}"
+            f"\n!!! ERROR in kline worker for {instrument_name} (Thread: {threading.current_thread().name}): {type(e).__name__} - {e}"
         )
+        # import traceback # Uncomment for full traceback from the thread
+        # print(traceback.format_exc()) # Uncomment for full traceback
         tqdm_status_postfix["status"] = "ERROR"
         return instrument_name, -1, "ERROR", tqdm_status_postfix
     finally:
         if worker_db_conn:
             worker_db_conn.close()
+        # Note: Do not close the asyncio loop here if threads are reused by ThreadPoolExecutor,
+        # as it might be needed by subsequent tasks on the same thread.
+        # Asyncio loops set via asyncio.set_event_loop() are generally managed per thread.
 
 
 def main_fetch_klines_for_db_symbols():
     parser = argparse.ArgumentParser(
         description="Stage 2: Fetches klines for symbols ALREADY IN THE LOCAL DATABASE."
     )
-    # ... (Argument parsing remains largely the same as your version) ...
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH)
     parser.add_argument(
         "--db-quote-asset",
@@ -252,14 +268,13 @@ def main_fetch_klines_for_db_symbols():
     )
     args = parser.parse_args()
 
-    config_obj = load_config(args.config)  # Renamed for clarity
+    config_obj = load_config(args.config)
 
-    # --- Parameter Setup (same as your version, using config_obj) ---
     db_quote_asset_arg = args.db_quote_asset or config_obj.get(
         "ingestion", "default_db_quote_asset_filter", fallback=None
     )
     if db_quote_asset_arg == "":
-        db_quote_asset_arg = None  # Treat empty string from config as None
+        db_quote_asset_arg = None
 
     db_instrument_like_arg = args.db_instrument_like
     db_symbols_list_arg = (
@@ -292,7 +307,6 @@ def main_fetch_klines_for_db_symbols():
     )
 
     print("--- Stage 2: Kline Ingestion for DB Symbols ---")
-    # ... (Print config summary as before) ...
     print(f"Config: {args.config}")
     print(
         f"DB Filters: QuoteAsset='{db_quote_asset_arg or 'Any'}', InstrumentLike='{db_instrument_like_arg or 'Any'}', SpecificList='{db_symbols_list_arg or 'None'}'"
@@ -322,7 +336,6 @@ def main_fetch_klines_for_db_symbols():
             )
             return
 
-        # ... (Print identified symbols summary as before) ...
         print(
             f"Identified {len(symbols_to_process)} symbols from DB for kline fetching."
         )
@@ -345,8 +358,8 @@ def main_fetch_klines_for_db_symbols():
             future_to_symbol_map = {
                 executor.submit(
                     kline_fetch_worker,
-                    s_data,  # symbol_data dict
-                    args.config,  # config_path string
+                    s_data,
+                    args.config,
                     start_date_arg,
                     end_date_arg,
                     interval_arg,
@@ -357,7 +370,6 @@ def main_fetch_klines_for_db_symbols():
                 for s_data in symbols_to_process
             }
 
-            # Main progress bar for symbols being processed
             pbar_symbols = tqdm(
                 total=len(symbols_to_process), desc="Processing Symbols", unit="symbol"
             )
@@ -365,51 +377,37 @@ def main_fetch_klines_for_db_symbols():
             for future in concurrent.futures.as_completed(future_to_symbol_map):
                 instrument_name = future_to_symbol_map[future]
                 try:
-                    # Worker now returns: instrument_name, klines_fetched, status_msg, tqdm_postfix_dict
                     _s_name_res, klines_fetched_res, status_msg_res, worker_postfix = (
                         future.result()
                     )
-
-                    pbar_symbols.set_postfix(
-                        worker_postfix, refresh=True
-                    )  # Update main progress bar's postfix
+                    pbar_symbols.set_postfix(worker_postfix, refresh=True)
 
                     if status_msg_res == "PROCESSED":
                         total_klines_ingested += klines_fetched_res
                         if klines_fetched_res > 0:
                             processed_with_data_count += 1
-                        # Worker's internal kline_ingestor prints its own summary for the symbol
                     elif status_msg_res == "SKIPPED_LIVE_CHECK":
                         skipped_by_live_check_count += 1
-                        # Optionally print a concise skip message if not too verbose
-                        # print(f"Symbol {instrument_name} skipped by live API filter.")
                     elif status_msg_res == "ERROR":
                         error_count += 1
-                        # Worker already prints its error
                 except Exception as exc:
                     error_count += 1
-                    # This catches errors in future.result() itself or if worker raised unhandled exception
                     print(
                         f"\n!!! EXCEPTION processing future for {instrument_name}: {type(exc).__name__} - {exc}"
                     )
-
-                pbar_symbols.update(1)  # Update main symbol progress bar
-
+                pbar_symbols.update(1)
             pbar_symbols.close()
 
         end_time_overall = time.time()
-        print()  # Newline after tqdm
+        print()
         print("\n--- Kline Ingestion Summary (from DB list) ---")
-        # ... (Summary print as before) ...
         print(f"Targeted symbols from DB: {len(symbols_to_process)}")
         print(f"Symbols with klines fetched/updated: {processed_with_data_count}")
         print(
             f"Symbols skipped by live API status check: {skipped_by_live_check_count}"
         )
         print(f"Symbols resulting in errors during kline fetch worker: {error_count}")
-        print(
-            f"Total klines ingested/updated: {total_klines_ingested}"
-        )  # This is sum of klines, not symbols
+        print(f"Total klines ingested/updated: {total_klines_ingested}")
         print(
             f"Total execution time: {end_time_overall - start_time_overall:.2f} seconds."
         )
