@@ -13,7 +13,15 @@
                     <h5 class="mb-0">Symbols</h5>
                 </div>
                 <div class="card-body">
-                    <p class="card-text fs-4">Total Unique Symbols: <strong>{{ "{:,}".format(overview_stats.total_symbols) if overview_stats.total_symbols is not none else 'N/A' }}</strong></p>
+                    <p class="card-text fs-4">Total Unique Symbols: 
+                        <strong>
+                            {% if overview_stats.total_symbols is number and overview_stats.total_symbols is not none %}
+                                {{ "{:,}".format(overview_stats.total_symbols) }}
+                            {% else %}
+                                {{ overview_stats.total_symbols | default('N/A') }}
+                            {% endif %}
+                        </strong>
+                    </p>
                 </div>
             </div>
         </div>
@@ -23,8 +31,16 @@
                     <h5 class="mb-0">Order Book Snapshots</h5>
                 </div>
                 <div class="card-body">
-                    <p class="card-text fs-5">Total Snapshots: <strong>{{ "{:,}".format(overview_stats.order_book_stats.count) if overview_stats.order_book_stats.count is not none else 'N/A' }}</strong></p>
-                    {% if overview_stats.order_book_stats.count > 0 %}
+                    <p class="card-text fs-5">Total Snapshots: 
+                        <strong>
+                            {% if overview_stats.order_book_stats.count is number and overview_stats.order_book_stats.count is not none %}
+                                {{ "{:,}".format(overview_stats.order_book_stats.count) }}
+                            {% else %}
+                                {{ overview_stats.order_book_stats.count | default('N/A') }}
+                            {% endif %}
+                        </strong>
+                    </p>
+                    {% if overview_stats.order_book_stats.count is number and overview_stats.order_book_stats.count > 0 %}
                     <p class="card-text small text-muted">
                         From: {{ overview_stats.order_book_stats.min_time.strftime('%Y-%m-%d %H:%M:%S UTC') if overview_stats.order_book_stats.min_time else 'N/A' }}<br>
                         To: {{ overview_stats.order_book_stats.max_time.strftime('%Y-%m-%d %H:%M:%S UTC') if overview_stats.order_book_stats.max_time else 'N/A' }}
@@ -55,7 +71,13 @@
                         {% for interval_key, stats_item in overview_stats.kline_stats_by_interval.items() %}
                         <tr>
                             <td>{{ stats_item.label }}</td>
-                            <td>{{ "{:,}".format(stats_item.count) if stats_item.count != 'Error' and stats_item.count is not none else stats_item.count }}</td>
+                            <td>
+                                {% if stats_item.count is number and stats_item.count is not none %}
+                                    {{ "{:,}".format(stats_item.count) }}
+                                {% else %}
+                                    {{ stats_item.count | default('N/A') }} {# Display "DB Error", "CAGG Missing", etc. as is, or N/A #}
+                                {% endif %}
+                            </td>
                             <td>{{ stats_item.min_time.strftime('%Y-%m-%d %H:%M:%S') if stats_item.min_time else 'N/A' }}</td>
                             <td>{{ stats_item.max_time.strftime('%Y-%m-%d %H:%M:%S') if stats_item.max_time else 'N/A' }}</td>
                         </tr>
@@ -135,6 +157,7 @@ document.addEventListener('DOMContentLoaded', function () {
             ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous drawing
             ctx.textAlign = 'center';
             ctx.fillStyle = '#888';
+            ctx.font = '14px Arial'; // Adjusted font size
             ctx.fillText(message, canvas.width / 2, canvas.height / 2);
         }
     }
@@ -169,7 +192,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
             });
         } else { showNoDataMessage('quoteAssetChart'); }
-    } catch (e) { console.error("Error rendering Quote Asset Chart:", e); showNoDataMessage('quoteAssetChart', 'Error loading chart.'); }
+    } catch (e) { console.error("Error rendering Quote Asset Chart:", e); showNoDataMessage('quoteAssetChart', 'Error loading chart data.'); }
 
     // 2. Top Symbols by Klines Chart (Horizontal Bar)
     try {
@@ -192,14 +215,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
             });
         } else { showNoDataMessage('topSymbolsKlinesChart'); }
-    } catch (e) { console.error("Error rendering Top Symbols Klines Chart:", e); showNoDataMessage('topSymbolsKlinesChart', 'Error loading chart.');}
+    } catch (e) { console.error("Error rendering Top Symbols Klines Chart:", e); showNoDataMessage('topSymbolsKlinesChart', 'Error loading chart data.');}
 
     // 3. Daily Klines Ingested Chart (Line)
     try {
         const dailyKlinesDataJson = '{{ plot_data.daily_klines_ingested_json | safe }}';
         const dailyKlinesData = JSON.parse(dailyKlinesDataJson);
         const dailyKlinesChartCtx = document.getElementById('dailyKlinesChart');
-        if (dailyKlinesChartCtx && dailyKlinesData.labels && dailyKlinesData.labels.length > 0) {
+        if (dailyKlinesChartCtx && dailyKlinesData.labels && dailyKlinesData.labels.length > 0 && dailyKlinesData.data.some(d => d > 0)) { // Check if there's actual data to plot
             new Chart(dailyKlinesChartCtx, {
                 type: 'line',
                 data: {
@@ -222,14 +245,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             });
         } else { showNoDataMessage('dailyKlinesChart'); }
-    } catch (e) { console.error("Error rendering Daily Klines Chart:", e); showNoDataMessage('dailyKlinesChart', 'Error loading chart.');}
+    } catch (e) { console.error("Error rendering Daily Klines Chart:", e); showNoDataMessage('dailyKlinesChart', 'Error loading chart data.');}
 
     // 4. Daily Order Book Snapshots Ingested Chart (Line)
     try {
         const dailySnapshotsDataJson = '{{ plot_data.daily_snapshots_ingested_json | safe }}';
         const dailySnapshotsData = JSON.parse(dailySnapshotsDataJson);
         const dailySnapshotsChartCtx = document.getElementById('dailySnapshotsChart');
-        if (dailySnapshotsChartCtx && dailySnapshotsData.labels && dailySnapshotsData.labels.length > 0) {
+        if (dailySnapshotsChartCtx && dailySnapshotsData.labels && dailySnapshotsData.labels.length > 0 && dailySnapshotsData.data.some(d => d > 0)) { // Check if there's actual data to plot
             new Chart(dailySnapshotsChartCtx, {
                 type: 'line',
                 data: {
@@ -252,7 +275,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             });
         } else { showNoDataMessage('dailySnapshotsChart'); }
-    } catch (e) { console.error("Error rendering Daily Snapshots Chart:", e); showNoDataMessage('dailySnapshotsChart', 'Error loading chart.');}
+    } catch (e) { console.error("Error rendering Daily Snapshots Chart:", e); showNoDataMessage('dailySnapshotsChart', 'Error loading chart data.');}
 });
 </script>
 {% endblock %}

@@ -168,6 +168,21 @@ refresh-aggregates: up
 	done
 	@echo "All continuous aggregates refresh process initiated."
 
+REFRESH_OVERVIEW_MVS = symbol_1m_kline_counts daily_1m_klines_ingested_stats daily_order_book_snapshots_ingested_stats
+refresh-custom-mvs: up
+	@echo "Refreshing custom materialized views for overview page..."
+	@for mv_name in $(REFRESH_OVERVIEW_MVS); do \
+		echo "Refreshing $$mv_name..."; \
+		if [ "$$mv_name" = "symbol_1m_kline_counts" ]; then \
+		    docker exec $(CONTAINER_DB_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "REFRESH MATERIALIZED VIEW CONCURRENTLY $$mv_name;"; \
+		else \
+		    docker exec $(CONTAINER_DB_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "REFRESH MATERIALIZED VIEW $$mv_name;"; \
+		fi; \
+	done
+	@echo "Custom materialized views refresh initiated."
+
+refresh-all-data-views: refresh-aggregates refresh-custom-mvs
+
 
 # --- Web UI Target ---
 webui:
