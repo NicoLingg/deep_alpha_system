@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS klines (
     low_price DECIMAL(20, 8) NOT NULL,
     close_price DECIMAL(20, 8) NOT NULL,
     volume DECIMAL(20, 8) NOT NULL,
-    close_time TIMESTAMPTZ NOT NULL,
+    close_time TIMESTAMPTZ NULL,
     quote_asset_volume DECIMAL(20, 8),
     number_of_trades INTEGER,
     taker_buy_base_asset_volume DECIMAL(20, 8),
@@ -77,8 +77,9 @@ SELECT
     MIN(low_price) AS low,
     last(close_price, time) AS close,
     SUM(volume) AS volume,
-    SUM(number_of_trades) AS trades,
+    last(close_time, time) AS close_time,
     SUM(quote_asset_volume) AS quote_asset_volume,
+    SUM(number_of_trades) AS trades,
     SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume,
     SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines
@@ -94,7 +95,7 @@ SELECT add_continuous_aggregate_policy('klines_5min',
 DROP MATERIALIZED VIEW IF EXISTS klines_10min CASCADE;
 CREATE MATERIALIZED VIEW klines_10min
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('10 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('10 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_10min', start_offset => INTERVAL '3 days', end_offset => INTERVAL '10 minutes', schedule_interval => INTERVAL '10 minutes', if_not_exists => TRUE);
 
@@ -102,7 +103,7 @@ SELECT add_continuous_aggregate_policy('klines_10min', start_offset => INTERVAL 
 DROP MATERIALIZED VIEW IF EXISTS klines_15min CASCADE;
 CREATE MATERIALIZED VIEW klines_15min
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('15 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('15 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_15min', start_offset => INTERVAL '3 days', end_offset => INTERVAL '10 minutes', schedule_interval => INTERVAL '15 minutes', if_not_exists => TRUE);
 
@@ -110,7 +111,7 @@ SELECT add_continuous_aggregate_policy('klines_15min', start_offset => INTERVAL 
 DROP MATERIALIZED VIEW IF EXISTS klines_30min CASCADE;
 CREATE MATERIALIZED VIEW klines_30min
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('30 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('30 minutes', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_30min', start_offset => INTERVAL '3 days', end_offset => INTERVAL '10 minutes', schedule_interval => INTERVAL '30 minutes', if_not_exists => TRUE);
 
@@ -118,7 +119,7 @@ SELECT add_continuous_aggregate_policy('klines_30min', start_offset => INTERVAL 
 DROP MATERIALIZED VIEW IF EXISTS klines_1hour CASCADE;
 CREATE MATERIALIZED VIEW klines_1hour
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('1 hour', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('1 hour', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_1hour', start_offset => INTERVAL '7 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => TRUE);
 
@@ -126,7 +127,7 @@ SELECT add_continuous_aggregate_policy('klines_1hour', start_offset => INTERVAL 
 DROP MATERIALIZED VIEW IF EXISTS klines_1day CASCADE;
 CREATE MATERIALIZED VIEW klines_1day
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('1 day', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('1 day', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_1day', start_offset => INTERVAL '3 months', end_offset => INTERVAL '1 day', schedule_interval => INTERVAL '1 day', if_not_exists => TRUE);
 
@@ -134,7 +135,7 @@ SELECT add_continuous_aggregate_policy('klines_1day', start_offset => INTERVAL '
 DROP MATERIALIZED VIEW IF EXISTS klines_6hour CASCADE;
 CREATE MATERIALIZED VIEW klines_6hour
 WITH (timescaledb.continuous) AS
-SELECT time_bucket('6 hours', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, SUM(number_of_trades) AS trades, SUM(quote_asset_volume) AS quote_asset_volume, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
+SELECT time_bucket('6 hours', time) AS bucket_time, symbol_id, first(open_price, time) AS open, MAX(high_price) AS high, MIN(low_price) AS low, last(close_price, time) AS close, SUM(volume) AS volume, last(close_time, time) AS close_time, SUM(quote_asset_volume) AS quote_asset_volume, SUM(number_of_trades) AS trades, SUM(taker_buy_base_asset_volume) AS taker_buy_base_asset_volume, SUM(taker_buy_quote_asset_volume) AS taker_buy_quote_asset_volume
 FROM klines WHERE interval = '1m' GROUP BY bucket_time, symbol_id WITH NO DATA;
 SELECT add_continuous_aggregate_policy('klines_6hour', start_offset => INTERVAL '3 months', end_offset => INTERVAL '6 hours', schedule_interval => INTERVAL '6 hours', if_not_exists => TRUE);
 

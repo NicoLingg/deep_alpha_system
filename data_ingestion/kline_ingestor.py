@@ -31,13 +31,63 @@ def store_klines_batch(
     records_to_insert: List[Tuple[Any, ...]] = []
     for _, kline_row in klines_data_df.iterrows():
         try:
-            open_time_utc = kline_row["time"]
+            open_time_utc = kline_row["time"]  # This is a pd.Timestamp from adapter
             open_price = kline_row["open"]
             high_price = kline_row["high"]
             low_price = kline_row["low"]
             close_price = kline_row["close"]
             volume = kline_row["volume"]
-            quote_asset_volume = kline_row.get("quote_volume", Decimal("0.0"))
+
+            # Standardized column name from adapter is 'quote_volume'
+            quote_asset_volume_val = kline_row.get("quote_volume")
+            if quote_asset_volume_val is None or pd.isna(quote_asset_volume_val):
+                quote_asset_volume_val = Decimal("0.0")  # Default if not provided or NA
+            else:
+                quote_asset_volume_val = (
+                    Decimal(str(quote_asset_volume_val))
+                    if not isinstance(quote_asset_volume_val, Decimal)
+                    else quote_asset_volume_val
+                )
+
+            # Standardized column name from adapter is 'close_timestamp'
+            close_timestamp_val = kline_row.get("close_timestamp")
+            if (
+                pd.isna(close_timestamp_val) or close_timestamp_val is None
+            ):  # Handles pd.NaT, None
+                close_timestamp_val = None
+            elif isinstance(
+                close_timestamp_val, pd.Timestamp
+            ):  # Convert to python datetime for psycopg2
+                close_timestamp_val = close_timestamp_val.to_pydatetime()
+
+            # Standardized column name from adapter is 'trade_count'
+            trade_count_val = kline_row.get("trade_count")
+            if (
+                pd.isna(trade_count_val) or trade_count_val is None
+            ):  # Handles pd.NA from Int64Dtype, None
+                trade_count_val = None
+
+            # Standardized column name from adapter is 'taker_base_volume'
+            taker_base_volume_val = kline_row.get("taker_base_volume")
+            if taker_base_volume_val is None or pd.isna(taker_base_volume_val):
+                taker_base_volume_val = None  # Nullable in DB
+            else:
+                taker_base_volume_val = (
+                    Decimal(str(taker_base_volume_val))
+                    if not isinstance(taker_base_volume_val, Decimal)
+                    else taker_base_volume_val
+                )
+
+            # Standardized column name from adapter is 'taker_quote_volume'
+            taker_quote_volume_val = kline_row.get("taker_quote_volume")
+            if taker_quote_volume_val is None or pd.isna(taker_quote_volume_val):
+                taker_quote_volume_val = None  # Nullable in DB
+            else:
+                taker_quote_volume_val = (
+                    Decimal(str(taker_quote_volume_val))
+                    if not isinstance(taker_quote_volume_val, Decimal)
+                    else taker_quote_volume_val
+                )
 
             if (
                 not isinstance(open_time_utc, pd.Timestamp)
@@ -47,7 +97,7 @@ def store_klines_batch(
                     "Kline time must be a timezone-aware Pandas Timestamp (UTC)."
                 )
 
-            # Ensure all numeric values are Decimal
+            # Ensure all numeric values are Decimal (already done by adapter for main ones, but good to ensure for DB)
             open_price = (
                 Decimal(str(open_price))
                 if not isinstance(open_price, Decimal)
@@ -69,15 +119,11 @@ def store_klines_batch(
                 else close_price
             )
             volume = Decimal(str(volume)) if not isinstance(volume, Decimal) else volume
-            quote_asset_volume = (
-                Decimal(str(quote_asset_volume))
-                if not isinstance(quote_asset_volume, Decimal)
-                else quote_asset_volume
-            )
+            # quote_asset_volume_val is already handled
 
             records_to_insert.append(
                 (
-                    open_time_utc,
+                    open_time_utc.to_pydatetime(),  # Convert pd.Timestamp to python datetime
                     symbol_id,
                     interval,
                     open_price,
@@ -85,13 +131,20 @@ def store_klines_batch(
                     low_price,
                     close_price,
                     volume,
-                    quote_asset_volume,
+                    quote_asset_volume_val,  # Corresponds to DB 'quote_asset_volume'
+                    close_timestamp_val,  # Corresponds to DB 'close_time'
+                    trade_count_val,  # Corresponds to DB 'number_of_trades'
+                    taker_base_volume_val,  # Corresponds to DB 'taker_buy_base_asset_volume'
+                    taker_quote_volume_val,  # Corresponds to DB 'taker_buy_quote_asset_volume'
                 )
             )
         except (KeyError, ValueError, TypeError, InvalidOperation) as e:
             print(
                 f"\nWarning: Skipping malformed kline data for symbol_id {symbol_id} from {exchange_name}: {kline_row}. Error: {e}"
             )
+            import traceback  # Temp for debugging
+
+            traceback.print_exc()  # Temp for debugging
             continue
 
     if not records_to_insert:
@@ -99,13 +152,18 @@ def store_klines_batch(
 
     query = """
         INSERT INTO klines (time, symbol_id, interval, open_price, high_price, low_price, close_price,
-                            volume, quote_asset_volume)
+                            volume, quote_asset_volume,
+                            close_time, number_of_trades, taker_buy_base_asset_volume, taker_buy_quote_asset_volume)
         VALUES %s
         ON CONFLICT (time, symbol_id, interval) DO UPDATE SET
             open_price = EXCLUDED.open_price, high_price = EXCLUDED.high_price,
             low_price = EXCLUDED.low_price, close_price = EXCLUDED.close_price,
             volume = EXCLUDED.volume,
             quote_asset_volume = EXCLUDED.quote_asset_volume,
+            close_time = EXCLUDED.close_time,
+            number_of_trades = EXCLUDED.number_of_trades,
+            taker_buy_base_asset_volume = EXCLUDED.taker_buy_base_asset_volume,
+            taker_buy_quote_asset_volume = EXCLUDED.taker_buy_quote_asset_volume,
             ingested_at = CURRENT_TIMESTAMP;
     """
     inserted_count_for_batch = 0
@@ -115,10 +173,7 @@ def store_klines_batch(
                 cursor, query, records_to_insert, page_size=len(records_to_insert)
             )
             conn.commit()
-            inserted_count_for_batch = (
-                cursor.rowcount
-            )  # execute_values doesn't directly return count of affected rows easily for ON CONFLICT
-            # rowcount here tells how many rows were affected by the command.
+            inserted_count_for_batch = cursor.rowcount
         except psycopg2.Error as e:
             conn.rollback()
             print(
@@ -129,7 +184,7 @@ def store_klines_batch(
         inserted_count_for_batch
         if inserted_count_for_batch >= 0
         else len(records_to_insert)
-    )  # psycopg2 might return -1
+    )
 
 
 def get_local_kline_daterange(
@@ -181,7 +236,7 @@ async def fetch_and_store_historical_klines(
     interval_str: str,
     requested_start_str_dt: str,
     requested_end_str_dt: Optional[str] = None,
-    kline_batch_size: int = 500,
+    kline_batch_size: int = 500,  # This parameter is not directly used by fetch_klines, but for chunking if API had limits smaller than full range
 ) -> int:
     total_processed_for_symbol_run = 0
     exchange_name = exchange_adapter.get_exchange_name()
@@ -234,34 +289,98 @@ async def fetch_and_store_historical_klines(
     fetch_tasks: List[Tuple[pd.Timestamp, Optional[pd.Timestamp], str]] = []
     api_req_end_dt_param = req_end_dt
 
-    if not min_time_local:
+    # Logic to determine fetch ranges based on local data and requested range
+    # This part assumes the adapter's fetch_klines can handle a large date range
+    # or that it internally pages. If not, this fetch_and_store_historical_klines
+    # would need to loop and make smaller calls to the adapter.
+    # For now, we'll make one call per "gap" identified.
+
+    current_fetch_start_dt = req_start_dt
+
+    # Task 1: Backfill older data if needed
+    if not min_time_local or req_start_dt < min_time_local:
+        effective_end_for_backfill = api_req_end_dt_param
+        if min_time_local and (
+            api_req_end_dt_param is None or api_req_end_dt_param >= min_time_local
+        ):
+            # If fetching to latest or beyond current local data, only backfill up to local start
+            effective_end_for_backfill = min_time_local - interval_delta
+
+        if (
+            effective_end_for_backfill is None
+            or effective_end_for_backfill >= req_start_dt
+        ):
+            fetch_tasks.append(
+                (
+                    req_start_dt,
+                    effective_end_for_backfill,
+                    (
+                        "older data (backfill)"
+                        if min_time_local
+                        else "full range (no local data)"
+                    ),
+                )
+            )
+            if effective_end_for_backfill is not None:
+                current_fetch_start_dt = max(
+                    current_fetch_start_dt, effective_end_for_backfill + interval_delta
+                )
+
+    # Task 2: Fetch newer data if needed
+    if max_time_local:
+        start_for_newer_data_dt = max(
+            max_time_local + interval_delta, current_fetch_start_dt
+        )
+    else:  # No local data yet, means current_fetch_start_dt is req_start_dt
+        start_for_newer_data_dt = current_fetch_start_dt
+        if (
+            fetch_tasks
+        ):  # if full range was already added, this might be redundant or needs adjustment
+            # if full range (req_start_dt to api_req_end_dt_param) was added, this logic is tricky
+            # This logic is simplified, assuming one main call or distinct backfill/forwardfill blocks
+            pass
+
+    # The fetch_tasks logic needs to be robust against overlaps.
+    # A simpler approach if adapter handles large ranges:
+    # 1. Fetch missing data before min_time_local
+    # 2. Fetch missing data after max_time_local up to req_end_dt (or now)
+
+    # Simplified fetch_tasks logic (revisiting the original more robust one)
+    fetch_tasks = []  # Resetting for clarity with original logic structure
+    if not min_time_local:  # No local data at all
         fetch_tasks.append(
             (req_start_dt, api_req_end_dt_param, "full range (no local data)")
         )
-    else:
+    else:  # Local data exists
+        # Fetch older data (backfill)
         if req_start_dt < min_time_local:
             backfill_end_dt = min_time_local - interval_delta
-            if backfill_end_dt >= req_start_dt:
+            if backfill_end_dt >= req_start_dt:  # Ensure end is not before start
                 fetch_tasks.append(
                     (req_start_dt, backfill_end_dt, "older data (backfill)")
                 )
 
+        # Fetch newer data (forward-fill)
+        # Start fetching from one interval after the latest local data, or from request_start_date if it's later
         start_for_newer_data_dt = max(max_time_local + interval_delta, req_start_dt)
-        if api_req_end_dt_param:
-            if api_req_end_dt_param >= start_for_newer_data_dt:
+
+        # Determine the end for this newer data fetch task
+        end_for_newer_data_dt = api_req_end_dt_param  # Could be None (fetch to latest)
+
+        if end_for_newer_data_dt:  # Fixed end date requested
+            if end_for_newer_data_dt >= start_for_newer_data_dt:
                 fetch_tasks.append(
                     (
                         start_for_newer_data_dt,
-                        api_req_end_dt_param,
+                        end_for_newer_data_dt,
                         "newer data (to fixed end)",
                     )
                 )
         else:  # Fetching to latest
-            if start_for_newer_data_dt <= pd.Timestamp.utcnow().tz_convert(
-                None
-            ).tz_localize(
-                "UTC"
-            ):  # Ensure comparable
+            # Only add task if start_for_newer_data is not in the future
+            # Ensure timestamps are comparable (both timezone-aware or both naive)
+            now_utc = pd.Timestamp.utcnow()  # This is already UTC
+            if start_for_newer_data_dt <= now_utc:
                 fetch_tasks.append(
                     (start_for_newer_data_dt, None, "newer data (to latest)")
                 )
@@ -289,22 +408,74 @@ async def fetch_and_store_historical_klines(
 
         klines_df_this_task = pd.DataFrame()
         try:
+            # The adapter's fetch_klines should handle pagination internally if necessary,
+            # or this loop would need to manage it with the `limit` parameter.
+            # Binance adapter's `get_historical_klines` has a limit (default 1000),
+            # but it can be called for a specific date range. If the range implies more than `limit` klines,
+            # it returns up to `limit` from the start of the range.
+            # For true historical backfill over long periods, this function would need to loop,
+            # advancing `effective_api_start_dt` until `effective_api_end_dt` is reached.
+            # The current structure makes one call per identified "gap".
+
+            # Assuming adapter's fetch_klines might return more than default limit if a large range is given
+            # and it handles its own paging if needed. Or, it returns up to 'limit' (e.g., 1000 for Binance).
+            # If it returns only up to adapter's internal limit (e.g. 1000 candles),
+            # then this fetch_and_store logic needs to loop.
+            # For now, assuming the adapter tries to get all klines in the date range specified.
+
             klines_df_this_task = await exchange_adapter.fetch_klines(
                 standard_symbol_str=standard_symbol_str,
                 interval=interval_str,
                 start_datetime=effective_api_start_dt,
                 end_datetime=effective_api_end_dt,
+                limit=None,  # Let adapter use its default or handle large range (Binance default is 1000)
+                # If we want to control chunks, pass kline_batch_size, but adapter needs to use it for paging
             )
+
             if not klines_df_this_task.empty:
-                processed_count = store_klines_batch(
-                    db_conn, klines_df_this_task, symbol_id, interval_str, exchange_name
-                )
-                total_processed_for_symbol_run += processed_count
-                print(
-                    f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}): API returned {len(klines_df_this_task)} klines, DB Processed/Updated: {processed_count}."
-                )
-                if processed_count > 0:
-                    await asyncio.sleep(0.1)
+                # The store_klines_batch will insert these. If there are many, it's one large DB transaction.
+                # For extremely large results from fetch_klines (e.g. years of 1m data),
+                # might be better to chunk klines_df_this_task before passing to store_klines_batch.
+
+                # Simple chunking if dataframe is too large:
+                if (
+                    len(klines_df_this_task) > kline_batch_size * 1.5
+                ):  # Heuristic to chunk if significantly larger
+                    num_chunks = (
+                        len(klines_df_this_task) + kline_batch_size - 1
+                    ) // kline_batch_size
+                    for i in range(num_chunks):
+                        chunk_df = klines_df_this_task.iloc[
+                            i * kline_batch_size : (i + 1) * kline_batch_size
+                        ]
+                        if not chunk_df.empty:
+                            processed_count_chunk = store_klines_batch(
+                                db_conn,
+                                chunk_df,
+                                symbol_id,
+                                interval_str,
+                                exchange_name,
+                            )
+                            total_processed_for_symbol_run += processed_count_chunk
+                            print(
+                                f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}) - Chunk {i+1}/{num_chunks}: API returned {len(chunk_df)} (part of {len(klines_df_this_task)}), DB Processed/Updated: {processed_count_chunk}."
+                            )
+                            if processed_count_chunk > 0:
+                                await asyncio.sleep(0.1)  # Small delay after DB write
+                else:  # Process as a single batch
+                    processed_count = store_klines_batch(
+                        db_conn,
+                        klines_df_this_task,
+                        symbol_id,
+                        interval_str,
+                        exchange_name,
+                    )
+                    total_processed_for_symbol_run += processed_count
+                    print(
+                        f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}): API returned {len(klines_df_this_task)} klines, DB Processed/Updated: {processed_count}."
+                    )
+                    if processed_count > 0:
+                        await asyncio.sleep(0.1)
             else:
                 print(
                     f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}): No klines returned from API."
@@ -316,7 +487,7 @@ async def fetch_and_store_historical_klines(
             import traceback
 
             traceback.print_exc()
-            continue
+            continue  # Continue to next task if one fails
 
     if total_processed_for_symbol_run > 0:
         print(
@@ -392,7 +563,7 @@ if __name__ == "__main__":
             print(f"Configuration error: Missing key {e}")
             exit(1)
 
-        kline_db_batch_size = int(
+        kline_db_batch_size_cfg = int(  # Renamed to avoid conflict with function param
             config_object.get("settings", "kline_fetch_batch_size", fallback="500")
         )
 
@@ -405,6 +576,10 @@ if __name__ == "__main__":
             exchange_adapter_instance = get_exchange_adapter(
                 args.exchange, config_object
             )
+            # Ensure exchange adapter's internal cache is populated for symbol normalization
+            if hasattr(exchange_adapter_instance, "_ensure_cache_populated"):
+                await exchange_adapter_instance._ensure_cache_populated()
+
             print(
                 f"Successfully connected to DB and initialized {args.exchange.capitalize()} adapter."
             )
@@ -417,27 +592,31 @@ if __name__ == "__main__":
             base_for_db = s_repr.base_asset
             quote_for_db = s_repr.quote_asset
             type_for_db = s_repr.instrument_type
-            if (
-                s_repr.instrument_type == "FUTURE" and s_repr.expiry_date
-            ):  # Handle specific future type from SymbolRepresentation
+            # For DB storage, future type might be stored as FUTURE_YYMMDD or just FUTURE
+            # get_or_create_symbol_id expects FUTURE_YYMMDD if expiry is present
+            if s_repr.instrument_type == "FUTURE" and s_repr.expiry_date:
                 type_for_db = f"FUTURE_{s_repr.expiry_date}"
 
             if args.base_asset:
                 base_for_db = args.base_asset.upper()
             if args.quote_asset:
                 quote_for_db = args.quote_asset.upper()
-            # Type for DB primarily from parsed symbol, but override if --instrument-type is more specific
-            if (
-                args.instrument_type and args.instrument_type.upper() != "SPOT"
-            ):  # if --instrument-type is given and not SPOT, use it
+
+            # Instrument type override from args
+            if args.instrument_type:
+                arg_instrument_type_upper = args.instrument_type.upper()
                 if (
-                    args.instrument_type.upper().startswith("FUTURE")
+                    arg_instrument_type_upper.startswith("FUTURE")
                     and s_repr.expiry_date
                 ):
-                    # if future, ensure expiry from parsed symbol is used
+                    # If arg is FUTURE and symbol had expiry, ensure it's FUTURE_YYMMDD
                     type_for_db = f"FUTURE_{s_repr.expiry_date}"
-                else:
-                    type_for_db = args.instrument_type.upper()
+                elif arg_instrument_type_upper == "PERP":
+                    type_for_db = "PERP"
+                elif arg_instrument_type_upper == "SPOT":
+                    type_for_db = "SPOT"
+                else:  # Generic type from arg if not matching specific structures
+                    type_for_db = arg_instrument_type_upper
 
             if not base_for_db or not quote_for_db:
                 print(
@@ -447,7 +626,7 @@ if __name__ == "__main__":
 
             exchange_instrument_name_for_db = (
                 exchange_adapter_instance.normalize_standard_symbol_to_exchange(
-                    args.symbol
+                    args.symbol  # Pass the standard symbol string here
                 )
             )
 
@@ -458,10 +637,10 @@ if __name__ == "__main__":
                 symbol_id_val, _ = get_or_create_symbol_id(
                     cursor,
                     exchange_id_val,
-                    exchange_instrument_name_for_db,
-                    base_for_db,
-                    quote_for_db,
-                    type_for_db,
+                    exchange_instrument_name_for_db,  # This is exchange specific name
+                    base_for_db,  # Standard base
+                    quote_for_db,  # Standard quote
+                    type_for_db,  # Standard type (e.g. SPOT, PERP, FUTURE_YYMMDD)
                 )
                 db_connection.commit()
 
@@ -479,12 +658,12 @@ if __name__ == "__main__":
                 exchange_adapter_instance,
                 db_connection,
                 symbol_id_val,
-                args.symbol,
-                exchange_instrument_name_for_db,
+                args.symbol,  # Pass the standard symbol string for adapter
+                exchange_instrument_name_for_db,  # For logging
                 args.interval,
                 args.start_date,
                 args.end_date,
-                kline_db_batch_size,
+                kline_db_batch_size_cfg,  # Pass the batch size from config
             )
         except psycopg2.Error as db_err:
             print(f"Database error: {db_err}")

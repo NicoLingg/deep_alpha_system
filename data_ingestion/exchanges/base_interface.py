@@ -32,12 +32,16 @@ class ExchangeInterface(ABC):
         """
         Fetches kline data for the given STANDARD symbol.
         Adapter is responsible for converting standard_symbol_str to exchange-specific format.
-        Returns a DataFrame with columns:
-        ['time', 'open', 'high', 'low', 'close', 'volume', 'quote_volume'].
-        - 'time': pd.Timestamp, UTC, representing the kline open time.
-        - price columns ('open', 'high', 'low', 'close'): Decimal.
-        - volume columns ('volume', 'quote_volume'): Decimal.
-        DataFrame should be empty if no data, not None.
+        Returns a DataFrame with standardized columns:
+        - 'time': pd.Timestamp, UTC, kline open time.
+        - 'open', 'high', 'low', 'close': Decimal.
+        - 'volume': Decimal, base asset volume.
+        - 'quote_volume': Decimal, quote asset volume.
+        - 'close_timestamp': pd.Timestamp, UTC, kline close time (nullable).
+        - 'trade_count': pd.Int64Dtype (to support NA), number of trades (nullable).
+        - 'taker_base_volume': Decimal, taker buy base asset volume (nullable).
+        - 'taker_quote_volume': Decimal, taker buy quote asset volume (nullable).
+        DataFrame should be empty if no data, not None. Columns should be present even if all values are None/NA.
         """
         pass
 

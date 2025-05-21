@@ -234,40 +234,48 @@ class BinanceAdapter(ExchangeInterface):
             if (
                 details["base_asset"] == s_repr.base_asset
                 and details["quote_asset"] == s_repr.quote_asset
-                and details["instrument_type"] == s_repr.instrument_type
-            ):  # expiry matching for futures/options needed if types are generic
-
-                if s_repr.instrument_type == FUTURE:  # For FUTURE_YYMMDD
-                    if details["instrument_type"] == f"{FUTURE}_{s_repr.expiry_date}":
-                        return ex_sym  # Return the exchange specific symbol key
-                elif (
-                    s_repr.instrument_type == SPOT or s_repr.instrument_type == PERP
-                ):  # Simpler types
-                    return ex_sym
-                # Add option logic if needed
+            ):
+                # Compare normalized instrument types (SymbolRepresentation handles FUTURE_YYMMDD)
+                cached_s_repr = SymbolRepresentation(
+                    base_asset=details["base_asset"],
+                    quote_asset=details["quote_asset"],
+                    instrument_type=details["instrument_type"],
+                    expiry_date=(
+                        details["instrument_type"].split("_")[1]
+                        if details["instrument_type"].startswith(f"{FUTURE}_")
+                        else None
+                    ),
+                )
+                if cached_s_repr.instrument_type == s_repr.instrument_type:
+                    if s_repr.instrument_type == FUTURE:
+                        if cached_s_repr.expiry_date == s_repr.expiry_date:
+                            return ex_sym
+                    else:  # SPOT, PERP
+                        return ex_sym
 
         # Fallback if not found in cache (should be rare if cache is comprehensive and recently refreshed)
         # This means the specific combination of base, quote, type isn't directly in our cache.
         # Try the direct conversion logic again as a last resort (might indicate an incomplete cache or new symbol)
         # print(f"Warning: Symbol {standard_symbol_str} not found in Binance cache by component match. Trying direct fallback conversion.")
         try:
-            s_repr = SymbolRepresentation.parse(standard_symbol_str)
-            if s_repr.instrument_type == SPOT:
-                return f"{s_repr.base_asset}{s_repr.quote_asset}"
-            elif s_repr.instrument_type == PERP:
+            s_repr_fallback = SymbolRepresentation.parse(
+                standard_symbol_str
+            )  # Renamed to avoid conflict
+            if s_repr_fallback.instrument_type == SPOT:
+                return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}"
+            elif s_repr_fallback.instrument_type == PERP:
                 binance_margin_asset = STANDARD_QUOTE_TO_BINANCE_PERP_QUOTE_MAP.get(
-                    s_repr.quote_asset, s_repr.quote_asset
+                    s_repr_fallback.quote_asset, s_repr_fallback.quote_asset
                 )
-                return f"{s_repr.base_asset}{binance_margin_asset}"
-            elif s_repr.instrument_type == FUTURE and s_repr.expiry_date:
-                if s_repr.quote_asset == "USD":
-                    return (
-                        f"{s_repr.base_asset}{s_repr.quote_asset}_{s_repr.expiry_date}"
-                    )
-                else:
-                    return (
-                        f"{s_repr.base_asset}{s_repr.quote_asset}{s_repr.expiry_date}"
-                    )
+                return f"{s_repr_fallback.base_asset}{binance_margin_asset}"
+            elif (
+                s_repr_fallback.instrument_type == FUTURE
+                and s_repr_fallback.expiry_date
+            ):
+                if s_repr_fallback.quote_asset == "USD":  # COIN-M
+                    return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}_{s_repr_fallback.expiry_date}"
+                else:  # USDT-M (Binance format might vary, e.g. BTCUSDT240927)
+                    return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}{s_repr_fallback.expiry_date}"
         except Exception as e:
             raise ValueError(
                 f"BinanceAdapter: Unable to normalize standard symbol '{standard_symbol_str}' to exchange format. Error: {e}. Consider refreshing cache."
@@ -305,7 +313,9 @@ class BinanceAdapter(ExchangeInterface):
             # but current _refresh_exchange_info_cache_impl stores specific "FUTURE_YYMMDD"
             expiry_date=(
                 details["instrument_type"].split("_")[1]
-                if details["instrument_type"].startswith(FUTURE)
+                if details["instrument_type"].startswith(
+                    f"{FUTURE}_"
+                )  # Use f-string for FUTURE
                 else None
             ),
         )
@@ -344,7 +354,7 @@ class BinanceAdapter(ExchangeInterface):
                 interval,
                 start_str=api_start_str,
                 end_str=api_end_str,
-                limit=limit if limit else 1000,
+                limit=limit if limit else 1000,  # Max limit is 1000 for Binance
             )
         except (BinanceAPIException, BinanceRequestException) as e:
             print(
@@ -359,6 +369,36 @@ class BinanceAdapter(ExchangeInterface):
 
         if not klines_data:
             return pd.DataFrame()
+
+        # Define the standard columns expected by the system
+        standard_columns_output_order = [
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "close_timestamp",
+            "trade_count",
+            "taker_base_volume",
+            "taker_quote_volume",
+        ]
+
+        # Initialize an empty DataFrame with these columns if klines_data is empty
+        # This case is handled by `if not klines_data: return pd.DataFrame()` above,
+        # but if we wanted to return a DF with specific columns, this is how:
+        # if not klines_data:
+        #     empty_df = pd.DataFrame(columns=standard_columns_output_order)
+        #     # Ensure correct dtypes for an empty DataFrame if necessary
+        #     for col in standard_columns_output_order:
+        #         if col in ["open", "high", "low", "close", "volume", "quote_volume", "taker_base_volume", "taker_quote_volume"]:
+        #             empty_df[col] = pd.Series(dtype=object) # For Decimals
+        #         elif col in ["time", "close_timestamp"]:
+        #             empty_df[col] = pd.Series(dtype='datetime64[ns, UTC]')
+        #         elif col == "trade_count":
+        #             empty_df[col] = pd.Series(dtype=pd.Int64Dtype())
+        #     return empty_df
 
         df = pd.DataFrame(
             klines_data,
@@ -377,18 +417,86 @@ class BinanceAdapter(ExchangeInterface):
                 "ignore",
             ],
         )
-        df["time"] = pd.to_datetime(df["kline_open_time"], unit="ms", utc=True)
-        df.rename(columns={"quote_asset_volume": "quote_volume"}, inplace=True)
 
-        numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
-        for col in numeric_cols:
-            try:
-                df[col] = df[col].apply(lambda x: Decimal(str(x)))
-            except InvalidOperation:
-                df[col] = pd.to_numeric(df[col], errors="coerce").apply(
-                    lambda x: Decimal(str(x)) if pd.notna(x) else Decimal("NaN")
+        # Time conversions
+        df["time"] = pd.to_datetime(df["kline_open_time"], unit="ms", utc=True)
+        df["close_timestamp"] = pd.to_datetime(
+            df["kline_close_time"], unit="ms", utc=True
+        )
+
+        # Rename to standard column names
+        df.rename(
+            columns={
+                "quote_asset_volume": "quote_volume",
+                "number_of_trades": "trade_count",
+                "taker_buy_base_asset_volume": "taker_base_volume",
+                "taker_buy_quote_asset_volume": "taker_quote_volume",
+            },
+            inplace=True,
+        )
+
+        # Ensure all standard columns are present, fill with pd.NA if missing from source
+        # This is important if other exchanges don't provide all these fields
+        for col_name in standard_columns_output_order:
+            if col_name not in df.columns:
+                if col_name == "trade_count":
+                    df[col_name] = pd.Series([pd.NA] * len(df), dtype=pd.Int64Dtype())
+                elif col_name in [
+                    "taker_base_volume",
+                    "taker_quote_volume",
+                    "quote_volume",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]:  # Decimals can be object type holding None/Decimal
+                    df[col_name] = pd.Series([None] * len(df), dtype=object)
+                elif col_name in [
+                    "time",
+                    "close_timestamp",
+                ]:  # Should always be present from Binance
+                    pass  # Assuming these are always derived
+                else:
+                    df[col_name] = pd.NA
+
+        # Numeric conversions (Decimal and Int64 for nullable int)
+        decimal_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "taker_base_volume",
+            "taker_quote_volume",
+        ]
+        for col in decimal_cols:
+            if col in df.columns:
+                # Convert to string first to handle potential scientific notation correctly with Decimal
+                df[col] = (
+                    df[col]
+                    .astype(str)
+                    .apply(
+                        lambda x: (
+                            Decimal(x)
+                            if x not in ["None", "nan", "NaT", str(pd.NA)]
+                            else None
+                        )
+                    )
                 )
-        return df[["time", "open", "high", "low", "close", "volume", "quote_volume"]]
+            else:  # Should have been created above with None
+                df[col] = pd.Series([None] * len(df), dtype=object)
+
+        if "trade_count" in df.columns:
+            df["trade_count"] = pd.to_numeric(
+                df["trade_count"], errors="coerce"
+            ).astype(pd.Int64Dtype())
+        else:  # Should have been created above with pd.NA
+            df["trade_count"] = pd.Series([pd.NA] * len(df), dtype=pd.Int64Dtype())
+
+        # Select and reorder to standard
+        return df[standard_columns_output_order]
 
     async def fetch_orderbook_snapshot(
         self, standard_symbol_str: str, limit: int = 100
@@ -431,10 +539,12 @@ class BinanceAdapter(ExchangeInterface):
             )
             return {"bids": [], "asks": [], "lastUpdateId": None, "exchange_ts": None}
 
-        exchange_timestamp_ms = depth.get("T", depth.get("E"))
+        exchange_timestamp_ms = depth.get(
+            "T", depth.get("E")
+        )  # 'T' for SPOT, 'E' for FUTURES event time
         exchange_pd_ts: Optional[pd.Timestamp] = (
             pd.to_datetime(exchange_timestamp_ms, unit="ms", utc=True)
-            if exchange_timestamp_ms
+            if exchange_timestamp_ms is not None  # Ensure not None before conversion
             else None
         )
 
@@ -484,7 +594,9 @@ class BinanceAdapter(ExchangeInterface):
             }
         except (BinanceAPIException, BinanceRequestException) as e:
             return {
-                "status": "ERROR" if e.code != -1121 else "UNKNOWN",
+                "status": (
+                    "ERROR" if e.code != -1121 else "UNKNOWN"
+                ),  # -1121 is "Invalid symbol"
                 "is_trading_allowed": False,
                 "error_message": str(e),
                 "error_code": e.code,
@@ -555,6 +667,11 @@ class BinanceAdapter(ExchangeInterface):
                     quote_asset=cached_details["quote_asset"],
                     instrument_type=cached_details["instrument_type"],
                     # Expiry etc. would be needed if handling futures here
+                    expiry_date=(
+                        cached_details["instrument_type"].split("_")[1]
+                        if cached_details["instrument_type"].startswith(f"{FUTURE}_")
+                        else None
+                    ),
                 )
                 standard_symbol_str = s_repr.normalized
 
