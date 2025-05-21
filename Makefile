@@ -22,6 +22,11 @@ RUN_SCRIPT = PYTHONPATH=. $(PYTHON) -m data_ingestion
 
 # --- Variables for Stage 1: Update Symbol Definitions ---
 SYM_EXCHANGE ?= binance # Default exchange for symbol definition update
+SYM_QUOTE_ASSET_FILTER ?= # Optional: Filter API symbols by standardized quote asset (e.g., USDT) before storing.
+SYM_API_STATUS_FILTER ?= # Optional: Filter API symbols by their status (e.g., TRADING_ONLY, ANY, CUSTOM:STATUS1). Uses config: symbol_management.default_api_status_filter_for_definitions if empty.
+SYM_INSTRUMENT_TYPE_FILTER ?= # Optional: Filter API symbols by instrument type (comma-separated, e.g., SPOT,PERP). Uses config: symbol_management.default_instrument_type_filter_for_definitions if empty.
+SYM_SYMBOLS_LIST_FILTER ?= # Optional: Comma-separated list of *standard* symbols to fetch definitions for (e.g., BTC-USDT,ETH-USD-PERP). Overrides other API filters if set.
+SYM_DRY_RUN ?= # Set to "true" or "yes" to perform a dry run without DB changes.
 # SYM_QUOTE_ASSET is not directly used by manage_symbols.py for API filtering,
 # but could be used if the script logic was extended.
 
@@ -39,9 +44,9 @@ KLINE_FETCH_WORKER_DELAY ?= # Uses config: ingestion.worker_symbol_delay if empt
 
 # --- Variables for Single Kline Fetch (primarily for testing/dev) ---
 SINGLE_KLINE_EXCHANGE ?= binance
-SINGLE_KLINE_SYMBOL ?= BTC-USDT 
+SINGLE_KLINE_SYMBOL ?= BTC-USDT
 SINGLE_KLINE_START_DATE ?= 2023-01-01T00:00:00Z
-SINGLE_KLINE_END_DATE ?= 
+SINGLE_KLINE_END_DATE ?=
 SINGLE_KLINE_INTERVAL ?= 1m
 # Optional: --base-asset, --quote-asset, --instrument-type if --symbol is not self-descriptive or needs override
 SINGLE_KLINE_BASE_ASSET ?=
@@ -92,8 +97,10 @@ help:
 	@echo ""
 	@echo "Core Workflow Targets (Recommended Order):"
 	@echo "  setup-db                    Shortcut: Combines 'up' and 'init-db'."
-	@echo "  update-symbol-definitions   Stage 1: Fetch all symbol definitions from an exchange and store/update in local DB."
-	@echo "                              Vars: SYM_EXCHANGE (default: binance)"
+	@echo "  update-symbol-definitions   Stage 1: Fetch symbol definitions from an exchange API and store/update in local DB, with filters."
+	@echo "                              Vars: SYM_EXCHANGE (default: binance),"
+	@echo "                                    SYM_DRY_RUN, SYM_QUOTE_ASSET_FILTER, SYM_API_STATUS_FILTER,"
+	@echo "                                    SYM_INSTRUMENT_TYPE_FILTER, SYM_SYMBOLS_LIST_FILTER"
 	@echo "  fetch-klines-from-db        Stage 2: Fetch klines for symbols ALREADY IN LOCAL DB, based on filters."
 	@echo "                              Vars: KLINE_FETCH_DB_EXCHANGE_NAME, KLINE_FETCH_DB_QUOTE_ASSET, KLINE_FETCH_DB_INSTRUMENT_LIKE,"
 	@echo "                                    KLINE_FETCH_DB_SYMBOLS_LIST (overrides other DB filters if set),"
@@ -189,7 +196,12 @@ db-shell: up
 # --- Core Workflow Targets ---
 update-symbol-definitions: up
 	@echo "Starting Stage 1: Updating symbol definitions in local DB from $(SYM_EXCHANGE) API..."
-	$(RUN_SCRIPT).manage_symbols --config "$(CONFIG_FILE_PATH)" --exchange "$(SYM_EXCHANGE)"
+	$(RUN_SCRIPT).manage_symbols --config "$(CONFIG_FILE_PATH)" --exchange "$(SYM_EXCHANGE)" \
+		$(if $(SYM_QUOTE_ASSET_FILTER),--quote-asset-filter "$(SYM_QUOTE_ASSET_FILTER)",) \
+		$(if $(SYM_API_STATUS_FILTER),--api-status-filter "$(SYM_API_STATUS_FILTER)",) \
+		$(if $(SYM_INSTRUMENT_TYPE_FILTER),--instrument-type-filter "$(SYM_INSTRUMENT_TYPE_FILTER)",) \
+		$(if $(SYM_SYMBOLS_LIST_FILTER),--symbols-list-filter "$(SYM_SYMBOLS_LIST_FILTER)",) \
+		$(if $(filter $(SYM_DRY_RUN),true yes True Yes YES),--dry-run,)
 
 fetch-klines-from-db: up
 	@echo "Starting Stage 2: Fetching klines for symbols defined in local DB..."
