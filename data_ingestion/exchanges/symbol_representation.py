@@ -1,12 +1,11 @@
-# data_ingestion/exchanges/symbol_representation.py
 from typing import Optional, Tuple
 from decimal import Decimal, InvalidOperation
 
 # Define standardized instrument type constants
 SPOT = "SPOT"
 PERP = "PERP"
-FUTURE = "FUTURE"  # Generic prefix for dated futures
-OPTION = "OPTION"  # Generic prefix for options
+FUTURE = "FUTURE"
+OPTION = "OPTION"
 
 
 class SymbolRepresentation:

@@ -17,9 +17,6 @@ try:
     from .symbol_utils import get_top_liquid_symbols_via_adapter
     from .exchanges.symbol_representation import SymbolRepresentation  # Added
 except ImportError:
-    # Fallback for running script directly from data_ingestion folder for testing
-    # This assumes utils.py, etc., are in the same directory or PYTHONPATH is set.
-    # For a structured project, it's better to run scripts as modules from the project root.
     import sys, os
 
     # Add project root to path if running from data_ingestion directly
@@ -43,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main_test_script():
-    setup_logging()  # Initialize logging for this script
+    setup_logging() 
     parser = argparse.ArgumentParser(
         description="Test script to get top liquid symbol from Binance and fetch its klines."
     )
@@ -114,9 +111,6 @@ async def main_test_script():
         adapter_instance = get_exchange_adapter(args.exchange, config_object)
         logger.info(f"Initialized {args.exchange.capitalize()} adapter.")
 
-        # Adapter's methods should handle their own cache needs if necessary
-        # e.g., get_top_liquid_symbols should call _ensure_cache_populated internally.
-
         logger.info(f"Fetching top {args.top_n_symbols} liquid symbol(s)...")
         top_symbols_data = await get_top_liquid_symbols_via_adapter(
             adapter_instance,
@@ -135,7 +129,6 @@ async def main_test_script():
         volume = top_symbol_info.get("normalized_quote_volume")
 
         logger.info("Top liquid symbol selected:")
-        # Using print for result display, not operational logging
         print(f"  Standard: {standard_symbol_to_fetch}")
         print(f"  Exchange-specific: {exchange_specific_symbol}")
         print(f"  Normalized Quote Volume: {volume:,.2f}")
@@ -168,13 +161,13 @@ async def main_test_script():
             logger.info(
                 f"Fetched {len(klines_df)} klines for {standard_symbol_to_fetch}:"
             )
-            print(klines_df.to_string())  # Print DataFrame for test output
+            print(klines_df.to_string())
         else:
             logger.warning(f"No klines returned for {standard_symbol_to_fetch}.")
 
-    except FileNotFoundError as e:  # Config file not found
+    except FileNotFoundError as e:
         logger.error(f"Configuration Error: {e}", exc_info=True)
-    except ValueError as ve:  # Errors from adapter init, symbol parsing etc.
+    except ValueError as ve:
         logger.error(f"Value Error: {ve}", exc_info=True)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)

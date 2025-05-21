@@ -74,13 +74,12 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    async def main_test_cli():  # Renamed from main_test to avoid conflict if this module is imported
+    async def main_test_cli():
         adapter_instance: Optional[ExchangeInterface] = None
         try:
             config_object = load_config(args.config)
             adapter_instance = get_exchange_adapter(args.exchange, config_object)
 
-            # Explicitly ensure cache for this test script, though get_top_liquid_symbols should also do it.
             if hasattr(adapter_instance, "_ensure_cache_populated"):
                 await adapter_instance._ensure_cache_populated()
 
@@ -106,7 +105,6 @@ if __name__ == "__main__":
                         f"(Std Quote Filter: {std_quote_filter or 'Any'}, Min Vol: {args.min_volume}):"
                     )
                     for idx, sym_data in enumerate(top_symbols_list_of_dicts):
-                        # Using print here for direct console output of results, not operational logging
                         print(
                             f"  {idx+1}. Exchange: {sym_data.get('exchange_specific_symbol', 'N/A')}, "
                             f"Standard: {sym_data.get('standard_symbol', 'N/A')}, "

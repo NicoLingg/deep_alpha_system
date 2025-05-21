@@ -1,6 +1,7 @@
 import psycopg2
 import argparse
 import pandas as pd
+import configparser
 from psycopg2.extras import execute_values, DictCursor
 from datetime import datetime as dt, timezone, timedelta  # dt alias used
 from typing import Optional, List, Tuple, Any
@@ -35,7 +36,7 @@ def store_klines_batch(
         return 0
 
     records_to_insert: List[Tuple[Any, ...]] = []
-    for _, kline_row in klines_data_df.iterrows():  # kline_row is a pandas Series
+    for _, kline_row in klines_data_df.iterrows():
         try:
             open_time_utc = kline_row["time"]
             open_price_raw = kline_row["open"]
@@ -492,7 +493,6 @@ async def fetch_and_store_historical_klines(
                     break
 
                 # Store fetched klines
-                # ... (DB chunking logic for store_klines_batch)
                 if len(klines_df_this_api_call) > kline_chunk_size_for_db * 1.2:
                     num_chunks = (
                         len(klines_df_this_api_call) + kline_chunk_size_for_db - 1
@@ -544,20 +544,11 @@ async def fetch_and_store_historical_klines(
                         )
                         segment_fully_fetched = True
                     else:
-                        # python-binance's get_historical_klines with start and end should fetch all in between.
-                        # This loop for defined end_dt is a failsafe or for adapters that don't auto-page fully.
-                        # If python-binance pages correctly, this segment should be fetched in one "API Call" from this loop's perspective.
-                        # If it does, then this `else` block for advancing `current_fetch_start_dt_for_segment` when `segment_end_dt` is set,
-                        # might not be strictly necessary if the adapter handles the full range.
-                        # However, keeping it provides robustness for other adapters or partial fetches.
                         logger.info(
                             f"{log_prefix} Fetched up to {last_kline_time_fetched}, segment end is {segment_end_dt}. Assuming adapter handled full range or this was one page."
                         )
-                        segment_fully_fetched = True  # Assume python-binance fetched all it could for the range.
-                        # If not, the next segment will pick it up if ranges are defined correctly.
+                        segment_fully_fetched = True
                 else:  # Fetching "to latest" (segment_end_dt is None)
-                    # If adapter's fetch_klines with end_datetime=None returns less than its typical max batch,
-                    # assume we've hit the most recent data. (e.g. Binance default limit is 1000)
                     adapter_max_batch_heuristic = (
                         990  # Slightly less than typical max (e.g. 1000)
                     )
@@ -615,7 +606,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Download klines using exchange adapters."
     )
-    # ... (Argument parsing remains the same as your last correct version) ...
     parser.add_argument(
         "--config",
         type=str,

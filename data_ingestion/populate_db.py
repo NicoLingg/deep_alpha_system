@@ -1,11 +1,9 @@
-# data_ingestion/populate_db.py
 import time
 import asyncio
 import argparse
 import psycopg2
 from psycopg2.extras import DictCursor
-import pandas as pd
-from tqdm import tqdm  # Keep tqdm for visible progress bar
+from tqdm import tqdm
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
@@ -27,13 +25,9 @@ logger = logging.getLogger(__name__)
 def get_target_symbols_from_local_db(
     db_conn,
     exchange_name_filter: Optional[str] = None,
-    quote_asset_filter: Optional[str] = None,  # Standardized quote asset
-    instrument_name_like: Optional[
-        str
-    ] = None,  # Exchange specific instrument name (supports SQL LIKE)
-    specific_standard_symbols_list: Optional[
-        List[str]
-    ] = None,  # List of "BTC-USDT" strings
+    quote_asset_filter: Optional[str] = None,
+    instrument_name_like: Optional[str] = None,
+    specific_standard_symbols_list: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     symbols_for_kline_fetch = []
     # To ensure we only add one DB entry per standard symbol when a specific list is provided

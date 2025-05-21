@@ -1,4 +1,3 @@
-# data_ingestion/exchanges/binance_adapter.py
 import asyncio
 import logging
 import pandas as pd
@@ -12,7 +11,8 @@ from .symbol_representation import SymbolRepresentation, SPOT, PERP, FUTURE
 
 logger = logging.getLogger(__name__)
 
-# Standardized internal quote asset concepts mapped FROM Binance's typical quote assets.
+# Idea: Standardized internal quote asset concepts mapped FROM Binance's typical quote assets.
+# For now we are NOT using this mapping, but it's here for future reference.
 BINANCE_QUOTE_TO_STANDARD_MAP = {
     "USDT": "USDT",
     "BUSD": "BUSD",
@@ -25,7 +25,7 @@ BINANCE_QUOTE_TO_STANDARD_MAP = {
     "ETH": "ETH",
 }
 
-# Map your STANDARD quote asset concept TO what Binance uses, especially for PERPs/FUTURES
+
 STANDARD_QUOTE_TO_BINANCE_PERP_QUOTE_MAP = {
     "USD": "USD",
     "USDT": "USDT",
@@ -49,31 +49,26 @@ class BinanceAdapter(ExchangeInterface):
         self._exchange_info_list: Optional[List[Dict[str, Any]]] = None
         self._symbol_details_cache: Dict[str, Dict[str, Any]] = {}
         self._ensure_cache_task: Optional[asyncio.Task] = None
-        self._cache_lock = (
-            asyncio.Lock()
-        )  # For finer-grained control over cache task creation
+        self._cache_lock = asyncio.Lock()
 
     async def _ensure_cache_populated(self, force_refresh: bool = False):
-        async with self._cache_lock:  # Ensure only one task tries to refresh at a time
+        async with self._cache_lock:
             if self._ensure_cache_task and not self._ensure_cache_task.done():
-                # Another task is already populating, wait for it
                 await self._ensure_cache_task
-                return  # Return after the existing task completes
+                return
 
             if self._exchange_info_list is None or force_refresh:
-                # Create a new task to refresh the cache
                 self._ensure_cache_task = asyncio.create_task(
                     self._refresh_exchange_info_cache_impl()
                 )
             else:
-                # Cache is already populated and no force refresh needed
                 return
 
-        # Await the task outside the lock to allow other callers to check cache status
         try:
-            await self._ensure_cache_task
+            if self._ensure_cache_task:
+                await self._ensure_cache_task
         finally:
-            async with self._cache_lock:  # Ensure task is cleared safely
+            async with self._cache_lock:
                 self._ensure_cache_task = None
 
     async def _refresh_exchange_info_cache_impl(self):
@@ -108,25 +103,24 @@ class BinanceAdapter(ExchangeInterface):
             binance_base_asset = s_info["baseAsset"]
             binance_quote_asset = s_info["quoteAsset"]
 
-            standard_base_asset = binance_base_asset.upper()
+            standard_base_asset = binance_base_asset.strip().upper()
+            # Use the map, fallback to the original quote asset if not in map
             standard_quote_asset = BINANCE_QUOTE_TO_STANDARD_MAP.get(
-                binance_quote_asset.upper(), binance_quote_asset.upper()
+                binance_quote_asset.strip().upper(), binance_quote_asset.strip().upper()
             )
 
             instrument_type = SPOT
-            expiry_date_str = None  # YYMMDD
+            expiry_date_str = None
 
             if s_info.get("contractType") == "PERPETUAL":
                 instrument_type = PERP
-                if (
-                    standard_quote_asset == "USDT"
-                ):  # Assuming USDT perps are conceptually USD backed
-                    standard_quote_asset = "USD"
+
             elif s_info.get("contractType") and s_info.get("contractType") not in [
                 "NONE",
                 "SPOT",
-            ]:  # Dated futures
-                # Example: BTCUSD_240927 (COIN-M) or BTCUSDT240927 (USDT-M, less common for dated)
+            ]:
+                # COIN-M: BTCUSD_YYMMDD (quote asset in symbol is USD, margin is BTC)
+                # USDT-M: BTCUSDTYYMMDD (quote asset in symbol is USDT, margin is USDT)
                 if (
                     "_" in exchange_specific_symbol
                 ):  # Typically COIN-M like BTCUSD_YYMMDD
@@ -134,38 +128,31 @@ class BinanceAdapter(ExchangeInterface):
                     if len(parts) > 1 and parts[-1].isdigit() and len(parts[-1]) == 6:
                         expiry_date_str = parts[-1]
                         instrument_type = f"{FUTURE}_{expiry_date_str}"
-                        # COIN-M futures are quoted against USD conceptually
-                        if exchange_specific_symbol.startswith(
-                            standard_base_asset + "USD_"
-                        ):
-                            standard_quote_asset = "USD"
-                # Check for USDT-M futures like BTCUSDTYYMMDD (no underscore)
-                # This requires more careful parsing, as symbol could be e.g. BTCUSDT or BTCUSDT240927
-                # A common pattern is BaseAsset + MarginAsset + Date.
-                # For simplicity, if not COIN-M format and contractType indicates future,
-                # try to parse date if symbol ends with 6 digits.
+                        # For COIN-M like BTCUSD_YYMMDD, the conceptual quote is USD.
+                        # standard_quote_asset should reflect this. Binance might return quoteAsset as 'USD'.
+                        # If Binance returns baseAsset='BTC', quoteAsset='USD' for BTCUSD_241231, map handles it.
                 elif (
-                    exchange_specific_symbol.upper().endswith(
-                        standard_base_asset + standard_quote_asset
-                    )
-                    and len(exchange_specific_symbol)
-                    > len(standard_base_asset + standard_quote_asset)
-                    and exchange_specific_symbol[
-                        len(standard_base_asset + standard_quote_asset) :
-                    ].isdigit()
-                    and len(
-                        exchange_specific_symbol[
-                            len(standard_base_asset + standard_quote_asset) :
-                        ]
-                    )
-                    == 6
+                    len(exchange_specific_symbol) > 6
+                    and exchange_specific_symbol[-6:].isdigit()
                 ):
-                    expiry_date_str = exchange_specific_symbol[
-                        len(standard_base_asset + standard_quote_asset) :
-                    ]
-                    instrument_type = f"{FUTURE}_{expiry_date_str}"
-                else:  # Generic future if specific format not matched
-                    instrument_type = FUTURE
+                    # Attempt to parse USDT-M futures like BTCUSDTYYMMDD
+                    # Check if symbol starts with base+quote and ends with 6 digits
+                    potential_base_quote = (
+                        standard_base_asset + standard_quote_asset
+                    )  # e.g. BTCUSDT
+                    if (
+                        exchange_specific_symbol.upper().startswith(
+                            potential_base_quote
+                        )
+                        and len(exchange_specific_symbol)
+                        == len(potential_base_quote) + 6
+                    ):
+                        expiry_date_str = exchange_specific_symbol[-6:]
+                        instrument_type = f"{FUTURE}_{expiry_date_str}"
+                else:
+                    instrument_type = (
+                        FUTURE  # Generic future if specific format not matched
+                    )
 
             tick_size = Decimal("0")
             lot_size = Decimal("0")
@@ -178,14 +165,18 @@ class BinanceAdapter(ExchangeInterface):
                     lot_size = Decimal(str(f_filter["stepSize"]))
                 elif f_filter["filterType"] == "MIN_NOTIONAL":
                     min_notional = Decimal(str(f_filter.get("notional", "0")))
-                elif f_filter["filterType"] == "NOTIONAL":  # Spot (older name)
+                elif f_filter["filterType"] == "MARKET_LOT_SIZE":  # For some futures
+                    pass  # lot_size already covered by LOT_SIZE for primary use
+                elif (
+                    f_filter["filterType"] == "NOTIONAL"
+                ):  # Spot (older name for MIN_NOTIONAL)
                     min_notional = Decimal(str(f_filter.get("minNotional", "0")))
 
             symbol_detail_for_list = {
                 "exchange_specific_symbol": exchange_specific_symbol,
                 "base_asset": standard_base_asset,
                 "quote_asset": standard_quote_asset,
-                "instrument_type": instrument_type,  # Could be "FUTURE_YYMMDD" or just "FUTURE"
+                "instrument_type": instrument_type,
                 "status": s_info.get("status", "UNKNOWN").upper(),
                 "tick_size": tick_size,
                 "lot_size": lot_size,
@@ -207,24 +198,28 @@ class BinanceAdapter(ExchangeInterface):
         return "binance"
 
     def normalize_standard_symbol_to_exchange(self, standard_symbol_str: str) -> str:
+        cleaned_standard_symbol_str = standard_symbol_str.strip()
         if not self._symbol_details_cache:
             logger.warning(
-                f"Binance _symbol_details_cache is empty during normalize_standard_symbol_to_exchange for {standard_symbol_str}. "
-                "Attempting direct conversion fallback. Populate cache first for reliability using fetch_exchange_symbols_info() or _ensure_cache_populated()."
+                f"Binance _symbol_details_cache is empty during normalize_standard_symbol_to_exchange for '{cleaned_standard_symbol_str}'. "
+                "Attempting direct conversion fallback. Populate cache first for reliability."
             )
             try:
-                s_repr = SymbolRepresentation.parse(standard_symbol_str)
+                s_repr = SymbolRepresentation.parse(cleaned_standard_symbol_str)
                 if s_repr.instrument_type == SPOT:
                     return f"{s_repr.base_asset}{s_repr.quote_asset}"
                 elif s_repr.instrument_type == PERP:
+                    # Fallback uses STANDARD_QUOTE_TO_BINANCE_PERP_QUOTE_MAP for margin asset
                     binance_margin_asset = STANDARD_QUOTE_TO_BINANCE_PERP_QUOTE_MAP.get(
                         s_repr.quote_asset,
-                        s_repr.quote_asset,  # Default to standard quote if not in map
+                        s_repr.quote_asset,
                     )
-                    return f"{s_repr.base_asset}{binance_margin_asset}"
+                    return f"{s_repr.base_asset}{binance_margin_asset}"  # e.g. BTCUSDT for BTC-USD-PERP (if USD->USDT map) or BTC-USDT-PERP
                 elif s_repr.instrument_type == FUTURE and s_repr.expiry_date:
+                    # COIN-M: BTCUSD_YYMMDD (standard: BTC-USD-FUTURE_YYMMDD)
+                    # USDT-M: BTCUSDTYYMMDD (standard: BTC-USDT-FUTURE_YYMMDD)
                     if s_repr.quote_asset == "USD":  # Assume COIN-M like BTCUSD_YYMMDD
-                        return f"{s_repr.base_asset}{s_repr.quote_asset}_{s_repr.expiry_date}"
+                        return f"{s_repr.base_asset}USD_{s_repr.expiry_date}"  # Explicitly USD for COIN-M
                     else:  # Assume USDT-M like BTCUSDTYYMMDD
                         return f"{s_repr.base_asset}{s_repr.quote_asset}{s_repr.expiry_date}"
                 else:
@@ -233,29 +228,24 @@ class BinanceAdapter(ExchangeInterface):
                     )
             except ValueError as e:
                 raise ValueError(
-                    f"BinanceAdapter: Error parsing standard symbol '{standard_symbol_str}' for fallback exchange normalization: {e}."
+                    f"BinanceAdapter: Error parsing standard symbol '{cleaned_standard_symbol_str}' for fallback exchange normalization: {e}."
                 )
 
         try:
-            s_repr_lookup = SymbolRepresentation.parse(standard_symbol_str)
+            s_repr_lookup = SymbolRepresentation.parse(cleaned_standard_symbol_str)
         except ValueError as e:
             raise ValueError(
-                f"BinanceAdapter: Invalid standard symbol string '{standard_symbol_str}': {e}"
+                f"BinanceAdapter: Invalid standard symbol string '{cleaned_standard_symbol_str}': {e}"
             )
 
         for ex_sym, details in self._symbol_details_cache.items():
-            # Construct SymbolRepresentation from cached details for accurate comparison
-            # The instrument_type in cache could be "FUTURE_YYMMDD" or just "FUTURE"
-            # SymbolRepresentation handles normalization of "FUTURE_YYMMDD" to FUTURE type with expiry_date
-
-            cached_expiry_date = None
             cached_instrument_type_base = details["instrument_type"]
-            if (
-                details["instrument_type"].startswith(f"{FUTURE}_")
-                and len(details["instrument_type"].split("_")) > 1
-            ):
-                cached_instrument_type_base = FUTURE
-                cached_expiry_date = details["instrument_type"].split("_")[1]
+            cached_expiry_date = None
+            if details["instrument_type"].startswith(f"{FUTURE}_"):
+                parts = details["instrument_type"].split("_", 1)
+                if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
+                    cached_instrument_type_base = FUTURE
+                    cached_expiry_date = parts[1]
 
             if (
                 details["base_asset"] == s_repr_lookup.base_asset
@@ -264,16 +254,15 @@ class BinanceAdapter(ExchangeInterface):
             ):
                 if s_repr_lookup.instrument_type == FUTURE:
                     if cached_expiry_date == s_repr_lookup.expiry_date:
-                        return ex_sym
+                        return ex_sym  # Return Binance's exchange_specific_symbol
                 else:  # SPOT, PERP
                     return ex_sym
 
         logger.warning(
-            f"Standard symbol '{standard_symbol_str}' not found in cache by component match. Re-attempting direct conversion as final fallback."
+            f"Standard symbol '{cleaned_standard_symbol_str}' not found in cache by component match. Re-attempting direct conversion as final fallback."
         )
-        # Try direct conversion again if cache lookup fails (might indicate incomplete cache or new/unusual symbol)
-        try:
-            s_repr_fallback = SymbolRepresentation.parse(standard_symbol_str)
+        try:  # Re-attempt direct conversion (same logic as initial fallback)
+            s_repr_fallback = SymbolRepresentation.parse(cleaned_standard_symbol_str)
             if s_repr_fallback.instrument_type == SPOT:
                 return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}"
             elif s_repr_fallback.instrument_type == PERP:
@@ -286,62 +275,59 @@ class BinanceAdapter(ExchangeInterface):
                 and s_repr_fallback.expiry_date
             ):
                 if s_repr_fallback.quote_asset == "USD":
-                    return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}_{s_repr_fallback.expiry_date}"
+                    return (
+                        f"{s_repr_fallback.base_asset}USD_{s_repr_fallback.expiry_date}"
+                    )
                 else:
                     return f"{s_repr_fallback.base_asset}{s_repr_fallback.quote_asset}{s_repr_fallback.expiry_date}"
-        except Exception as e_fallback_direct:  # Catch any error from this last attempt
+        except Exception as e_fallback_direct:
             raise ValueError(
-                f"BinanceAdapter: Unable to normalize standard symbol '{standard_symbol_str}' to exchange format even with fallback. Error: {e_fallback_direct}. Consider refreshing cache."
+                f"BinanceAdapter: Unable to normalize standard symbol '{cleaned_standard_symbol_str}' to exchange format even with fallback. Error: {e_fallback_direct}. Consider refreshing cache."
             )
 
         raise ValueError(
-            f"BinanceAdapter: Could not find exchange symbol for standard '{standard_symbol_str}' in cache and all fallbacks failed."
+            f"BinanceAdapter: Could not find exchange symbol for standard '{cleaned_standard_symbol_str}' in cache and all fallbacks failed."
         )
 
     async def normalize_exchange_symbol_to_standard(
         self, exchange_specific_symbol: str, instrument_type_hint: Optional[str] = None
     ) -> str:
-        await self._ensure_cache_populated()  # Ensure cache is ready
+        cleaned_exchange_symbol = exchange_specific_symbol.strip().upper()
+        await self._ensure_cache_populated()
 
-        details = self._symbol_details_cache.get(exchange_specific_symbol.upper())
+        details = self._symbol_details_cache.get(cleaned_exchange_symbol)
         if not details:
-            # If not found, try to refresh cache once and re-check, in case it's a new symbol
             logger.warning(
-                f"BinanceAdapter: Exchange symbol '{exchange_specific_symbol}' not in cache. Refreshing cache once."
+                f"BinanceAdapter: Exchange symbol '{cleaned_exchange_symbol}' not in cache. Refreshing cache once."
             )
             await self._ensure_cache_populated(force_refresh=True)
-            details = self._symbol_details_cache.get(exchange_specific_symbol.upper())
+            details = self._symbol_details_cache.get(cleaned_exchange_symbol)
             if not details:
                 raise ValueError(
-                    f"BinanceAdapter: Exchange symbol '{exchange_specific_symbol}' not found in cache even after refresh. "
+                    f"BinanceAdapter: Exchange symbol '{cleaned_exchange_symbol}' not found in cache even after refresh. "
                     f"Hint: '{instrument_type_hint}'."
                 )
 
-        # instrument_type from cache might be e.g. "FUTURE_241231"
-        # SymbolRepresentation constructor expects base type "FUTURE" and expiry_date separately
         raw_instrument_type = details["instrument_type"]
-        base_instrument_type = raw_instrument_type
-        expiry_date = None
+        base_instrument_type_for_srepr = raw_instrument_type
+        expiry_date_for_srepr = None
 
         if raw_instrument_type.startswith(f"{FUTURE}_"):
             parts = raw_instrument_type.split("_", 1)
             if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
-                base_instrument_type = FUTURE
-                expiry_date = parts[1]
-            # else: stay as FUTURE_YYMMDD if not parsable, SymbolRepresentation will handle it or error
+                base_instrument_type_for_srepr = FUTURE
+                expiry_date_for_srepr = parts[1]
 
         s_repr = SymbolRepresentation(
             base_asset=details["base_asset"],
             quote_asset=details["quote_asset"],
-            instrument_type=base_instrument_type,
-            expiry_date=expiry_date,
+            instrument_type=base_instrument_type_for_srepr,
+            expiry_date=expiry_date_for_srepr,
         )
         return s_repr.normalized
 
     async def fetch_exchange_symbols_info(self) -> List[Dict[str, Any]]:
-        await self._ensure_cache_populated(
-            force_refresh=True
-        )  # Always refresh for this explicit call
+        await self._ensure_cache_populated(force_refresh=True)
         return self._exchange_info_list if self._exchange_info_list is not None else []
 
     async def fetch_klines(
@@ -350,9 +336,7 @@ class BinanceAdapter(ExchangeInterface):
         interval: str,
         start_datetime: Optional[pd.Timestamp] = None,
         end_datetime: Optional[pd.Timestamp] = None,
-        limit: Optional[
-            int
-        ] = 1000,  # Default to Binance's typical max limit per request
+        limit: Optional[int] = 1000,
     ) -> pd.DataFrame:
         await self._ensure_cache_populated()
         exchange_symbol = self.normalize_standard_symbol_to_exchange(
@@ -367,11 +351,9 @@ class BinanceAdapter(ExchangeInterface):
         api_end_str = (
             end_datetime.strftime("%d %b, %Y %H:%M:%S UTC") if end_datetime else None
         )
-
-        # python-binance's get_historical_klines handles pagination over date range
-        # The `limit` here applies to each underlying request it makes.
-        # Max allowed by Binance API is typically 1000.
-        effective_limit = limit if limit is not None else 1000
+        effective_limit = (
+            limit if limit is not None and limit > 0 else 1000
+        )  # Default to 1000 if None or invalid - Binance's max limit
 
         try:
             klines_data = await asyncio.to_thread(
@@ -459,11 +441,8 @@ class BinanceAdapter(ExchangeInterface):
                     "close",
                     "volume",
                 ]:
-                    df[col_name] = pd.Series(
-                        [None] * len(df), dtype=object
-                    )  # For Decimals
-                # time and close_timestamp are derived, should be present
-                else:  # Should not happen for Binance if columns are mapped
+                    df[col_name] = pd.Series([None] * len(df), dtype=object)
+                else:
                     df[col_name] = pd.NA
 
         decimal_cols = [
@@ -481,22 +460,22 @@ class BinanceAdapter(ExchangeInterface):
                 df[col] = (
                     df[col]
                     .astype(str)
-                    .apply(
+                    .apply(  # astype(str) first for robust Decimal conversion
                         lambda x: (
                             Decimal(x)
-                            if x not in ["None", "nan", "NaT", str(pd.NA), None]
+                            if x not in ["None", "nan", "NaT", str(pd.NA), None, ""]
                             else None
                         )
                     )
                 )
-            else:  # Should have been created above
+            else:
                 df[col] = pd.Series([None] * len(df), dtype=object)
 
         if "trade_count" in df.columns:
             df["trade_count"] = pd.to_numeric(
                 df["trade_count"], errors="coerce"
             ).astype(pd.Int64Dtype())
-        else:  # Should have been created above
+        else:
             df["trade_count"] = pd.Series([pd.NA] * len(df), dtype=pd.Int64Dtype())
 
         return df[standard_columns_output_order]
@@ -509,18 +488,22 @@ class BinanceAdapter(ExchangeInterface):
             standard_symbol_str
         )
 
-        valid_limits = [5, 10, 20, 50, 100, 500, 1000, 5000]  # Spot limits
+        valid_limits = [5, 10, 20, 50, 100, 500, 1000, 5000]
         actual_limit = limit
         if limit not in valid_limits:
             actual_limit = next(
                 (l for l in valid_limits if l >= limit), valid_limits[-1]
             )
 
+        depth_response_raw: Optional[Dict[str, Any]] = None
         try:
-            depth = await asyncio.to_thread(
+            depth_response_raw = await asyncio.to_thread(
                 self.sync_client.get_order_book,
                 symbol=exchange_symbol,
                 limit=actual_limit,
+            )
+            logger.debug(
+                f"Raw order book depth response for {exchange_symbol} (limit {actual_limit}): {str(depth_response_raw)[:500]}"
             )
         except (BinanceAPIException, BinanceRequestException) as e:
             logger.error(
@@ -535,24 +518,43 @@ class BinanceAdapter(ExchangeInterface):
             )
             return {"bids": [], "asks": [], "lastUpdateId": None, "exchange_ts": None}
 
-        exchange_timestamp_ms = depth.get(
-            "T", depth.get("E")
-        )  # 'T' for SPOT, 'E' for FUTURES
-        exchange_pd_ts: Optional[pd.Timestamp] = (
-            pd.to_datetime(exchange_timestamp_ms, unit="ms", utc=True)
-            if exchange_timestamp_ms is not None
-            else None
-        )
+        # Spot order book snapshot from /api/v3/depth DOES NOT include 'E' or 'T'.
+        # Futures order book snapshot from /fapi/v1/depth or /dapi/v1/depth DOES include 'E' and 'T'.
+        # This adapter primarily uses client.get_order_book which hits /api/v3/depth for spot.
+        # If futures order books are needed, a different client method (e.g., client.futures_order_book)
+        # and corresponding parsing would be required.
+        exchange_timestamp_ms = depth_response_raw.get(
+            "T", depth_response_raw.get("E")
+        )  # Will be None for SPOT
+        exchange_pd_ts: Optional[pd.Timestamp] = None
+        if exchange_timestamp_ms is not None:
+            try:
+                exchange_pd_ts = pd.to_datetime(
+                    exchange_timestamp_ms, unit="ms", utc=True
+                )
+            except Exception as e_ts:
+                logger.warning(
+                    f"Could not parse exchange_timestamp_ms '{exchange_timestamp_ms}' for {exchange_symbol}: {e_ts}"
+                )
+
+        last_update_id_val = depth_response_raw.get("lastUpdateId")
+        if last_update_id_val is None:
+            logger.warning(
+                f"lastUpdateId is missing from depth response for {exchange_symbol}. Keys: {depth_response_raw.keys()}"
+            )
+            # For SPOT, lastUpdateId should always be there. If it's missing, the response is unusual.
 
         return {
             "bids": [
-                [Decimal(str(b[0])), Decimal(str(b[1]))] for b in depth.get("bids", [])
+                [Decimal(str(b[0])), Decimal(str(b[1]))]
+                for b in depth_response_raw.get("bids", [])
             ],
             "asks": [
-                [Decimal(str(a[0])), Decimal(str(a[1]))] for a in depth.get("asks", [])
+                [Decimal(str(a[0])), Decimal(str(a[1]))]
+                for a in depth_response_raw.get("asks", [])
             ],
-            "lastUpdateId": depth.get("lastUpdateId"),
-            "exchange_ts": exchange_pd_ts,
+            "lastUpdateId": last_update_id_val,
+            "exchange_ts": exchange_pd_ts,  # Will be None for SPOT markets
         }
 
     async def check_api_symbol_status(
@@ -564,21 +566,23 @@ class BinanceAdapter(ExchangeInterface):
             )
             if not s_info:
                 return {
-                    "status": "UNKNOWN",
+                    "status": "UNKNOWN_NO_INFO",
                     "is_trading_allowed": False,
                     "error_message": "No symbol info from API.",
                     "raw_details": None,
                 }
 
             api_status = s_info.get("status", "UNKNOWN").upper()
-            is_trading_allowed = api_status == "TRADING"
+            is_trading_allowed = api_status == "TRADING"  # Base check
 
-            if "isSpotTradingAllowed" in s_info:  # SPOT
+            # Specific checks based on instrument type implied by response structure
+            if "isSpotTradingAllowed" in s_info:  # Likely a SPOT symbol
                 is_trading_allowed = is_trading_allowed and s_info.get(
                     "isSpotTradingAllowed", False
                 )
-            elif "contractType" in s_info:  # FUTURES/PERP
+            elif "contractType" in s_info:  # Likely a FUTURES/PERP symbol
                 contract_status = s_info.get("contractStatus", "").upper()
+                # For futures, TRADING status for the symbol itself and contractStatus=TRADING is needed
                 if contract_status and contract_status != "TRADING":
                     is_trading_allowed = False
 
@@ -591,10 +595,13 @@ class BinanceAdapter(ExchangeInterface):
             logger.warning(
                 f"Binance API error checking status for {exchange_specific_symbol}: Code {e.code}, Msg: {e.message}"
             )
+            status_on_error = "ERROR_API"
+            if e.code == -1121:
+                status_on_error = "UNKNOWN_INVALID_SYMBOL"  # Invalid symbol
+            elif e.code == -1021:
+                status_on_error = "ERROR_TS_SYNC"  # Timestamp for this request is outside of the recvWindow
             return {
-                "status": (
-                    "ERROR" if e.code != -1121 else "UNKNOWN_SYMBOL"
-                ),  # -1121 is "Invalid symbol"
+                "status": status_on_error,
                 "is_trading_allowed": False,
                 "error_message": str(e),
                 "error_code": e.code,
@@ -606,7 +613,7 @@ class BinanceAdapter(ExchangeInterface):
                 exc_info=True,
             )
             return {
-                "status": "ERROR",
+                "status": "ERROR_GENERIC",
                 "is_trading_allowed": False,
                 "error_message": str(e_generic),
                 "raw_details": None,
@@ -618,12 +625,13 @@ class BinanceAdapter(ExchangeInterface):
         standard_quote_asset_filter: Optional[str] = "USDT",
         min_volume: float = 0,
     ) -> List[Dict[str, Any]]:
-        await self._ensure_cache_populated()  # Critical for normalization
+        await self._ensure_cache_populated()
 
         try:
-            # Assuming SPOT tickers. For futures, use client.futures_ticker() or client.delivery_ticker()
-            # This part might need to be expanded if futures liquidity is also desired.
-            tickers = await asyncio.to_thread(self.sync_client.get_ticker)
+            # client.get_ticker() fetches SPOT tickers.
+            # For futures, client.futures_ticker() or client.delivery_ticker() would be needed.
+            # This implementation currently targets SPOT liquidity.
+            tickers_raw = await asyncio.to_thread(self.sync_client.get_ticker)
         except (BinanceAPIException, BinanceRequestException) as e:
             logger.error(f"Binance API error fetching tickers: {e}", exc_info=True)
             return []
@@ -635,15 +643,17 @@ class BinanceAdapter(ExchangeInterface):
             return []
 
         liquid_symbols_data = []
-        for ticker_data in tickers:
-            exchange_symbol = ticker_data["symbol"]
-            cached_details = self._symbol_details_cache.get(exchange_symbol.upper())
+        for ticker_data in tickers_raw:
+            exchange_symbol = ticker_data.get("symbol")
+            if not exchange_symbol:
+                continue
 
+            cached_details = self._symbol_details_cache.get(exchange_symbol.upper())
             if not cached_details:
                 # logger.debug(f"Skipping ticker {exchange_symbol}: Not found in cached exchange info.")
                 continue
 
-            # Assuming get_ticker() returns SPOT symbols. Adapt if different ticker sources are used.
+            # Filter: Only consider SPOT symbols if get_ticker() is for SPOT
             if cached_details["instrument_type"] != SPOT:
                 continue
 
@@ -654,33 +664,27 @@ class BinanceAdapter(ExchangeInterface):
                 ):
                     continue
             try:
-                quote_volume_val = float(ticker_data["quoteVolume"])
+                quote_volume_str = ticker_data.get("quoteVolume")
+                if quote_volume_str is None:
+                    continue
+                quote_volume_val = float(quote_volume_str)
+
                 if quote_volume_val < min_volume:
                     continue
 
-                # Construct SymbolRepresentation for standard_symbol string
-                # Instrument type from cache might be specific e.g. FUTURE_YYMMDD
-                raw_instrument_type = cached_details["instrument_type"]
-                base_instrument_type_for_srepr = raw_instrument_type
-                expiry_date_for_srepr = None
-                if raw_instrument_type.startswith(f"{FUTURE}_"):
-                    parts = raw_instrument_type.split("_", 1)
-                    if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 6:
-                        base_instrument_type_for_srepr = FUTURE
-                        expiry_date_for_srepr = parts[1]
-
+                # Standard symbol string construction (already done in normalize_exchange_symbol_to_standard)
+                # but we can reconstruct here for clarity or use the cached details directly
                 s_repr = SymbolRepresentation(
                     base_asset=cached_details["base_asset"],
                     quote_asset=cached_details["quote_asset"],
-                    instrument_type=base_instrument_type_for_srepr,
-                    expiry_date=expiry_date_for_srepr,
+                    instrument_type=SPOT,
                 )
-                standard_symbol_str = s_repr.normalized
+                standard_symbol_str_normalized = s_repr.normalized
 
                 liquid_symbols_data.append(
                     {
                         "exchange_specific_symbol": exchange_symbol,
-                        "standard_symbol": standard_symbol_str,
+                        "standard_symbol": standard_symbol_str_normalized,
                         "normalized_quote_volume": quote_volume_val,
                         "raw_ticker_data": ticker_data,
                     }
@@ -689,7 +693,7 @@ class BinanceAdapter(ExchangeInterface):
                 logger.warning(
                     f"Skipping ticker processing for {exchange_symbol} due to data error: {e}",
                     exc_info=False,
-                )  # no exc_info for brevity
+                )
                 continue
 
         liquid_symbols_data.sort(
@@ -698,9 +702,7 @@ class BinanceAdapter(ExchangeInterface):
         return liquid_symbols_data[:top_n]
 
     async def close_session(self):
-        # BinanceSyncClient does not have an explicit close method for network sessions
         logger.info(
-            f"BinanceAdapter: No explicit async session to close for BinanceSyncClient."
+            f"BinanceAdapter ({self.get_exchange_name()}): No explicit async session to close for BinanceSyncClient."
         )
-        # If BinanceAsyncClient were used: await self.async_client.close_connection()
         pass

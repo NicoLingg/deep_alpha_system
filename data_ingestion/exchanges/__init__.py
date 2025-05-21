@@ -5,7 +5,7 @@ from .symbol_representation import (
     SPOT,
     PERP,
     FUTURE,
-)  # Expose constants too
+) 
 
 __all__ = [
     "ExchangeInterface",

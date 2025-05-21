@@ -1,8 +1,6 @@
-# data_ingestion/exchanges/base_interface.py
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import List, Dict, Any, Optional
-from decimal import Decimal
 
 
 class ExchangeInterface(ABC):

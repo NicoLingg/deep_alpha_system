@@ -1,10 +1,10 @@
 import os
 import psycopg2
 import configparser
-from psycopg2.extras import DictCursor  # Default cursor
-from psycopg2.extensions import cursor as PgCursor  # For type hinting
+from psycopg2.extras import DictCursor
+from psycopg2.extensions import cursor as PgCursor
 from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine as SqlAlchemyEngine  # For type hinting
+from sqlalchemy.engine import Engine as SqlAlchemyEngine
 from typing import Optional, Tuple, Any, Type, Dict
 import logging
 import logging.config
@@ -12,7 +12,6 @@ from .exchanges.base_interface import ExchangeInterface
 
 
 # --- Project Root and Default Config Path ---
-# Assuming utils.py is in data_ingestion, which is one level down from project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "config.ini")
 
@@ -39,31 +38,23 @@ def setup_logging(level=logging.INFO):
             "console": {
                 "class": "logging.StreamHandler",
                 "formatter": "standard",
-                "level": level,  # Set level for console handler
-                "stream": "ext://sys.stdout",  # Default is stderr
+                "level": level,
+                "stream": "ext://sys.stdout",
             }
         },
-        "root": {  # Configure root logger
+        "root": {
             "handlers": ["console"],
-            "level": level,  # Set root logger level
+            "level": level,
         },
-        # Example: Configure specific loggers if needed
-        # 'loggers': {
-        #     'data_ingestion.binance_adapter': {
-        #         'handlers': ['console'],
-        #         'level': 'DEBUG', # More verbose for specific module
-        #         'propagate': False # Don't pass to root logger if handled here
-        #     }
-        # }
     }
     logging.config.dictConfig(logging_config)
     # logger.debug("Logging configured.") # Use after config is set
 
 
-# --- Adapter Mapping (Late import to avoid circular dependencies if adapters use utils) ---
 _EXCHANGE_ADAPTER_MAP: Optional[Dict[str, Any]] = None
 
 
+# TODO: Move some of these to a config file or some other way
 def _get_adapter_map():
     global _EXCHANGE_ADAPTER_MAP
     if _EXCHANGE_ADAPTER_MAP is None:
@@ -84,12 +75,10 @@ def load_config(config_path: Optional[str] = None) -> configparser.ConfigParser:
         path_to_load = DEFAULT_CONFIG_PATH
     elif os.path.isabs(config_path):
         path_to_load = config_path
-    else:  # Relative path, assume relative to project root
+    else:
         path_to_load = os.path.join(PROJECT_ROOT, config_path)
 
-    # Fallback checks if not found at primary location
     if not os.path.exists(path_to_load):
-        # Check relative to CWD
         cwd_path = os.path.join(
             os.getcwd(),
             config_path if config_path else os.path.basename(DEFAULT_CONFIG_PATH),
@@ -97,7 +86,6 @@ def load_config(config_path: Optional[str] = None) -> configparser.ConfigParser:
         if os.path.exists(cwd_path):
             path_to_load = cwd_path
         else:
-            # Check CWD/config/ P(like project_root/config/)
             potential_cwd_config_path = os.path.join(
                 os.getcwd(),
                 "config",
@@ -141,10 +129,10 @@ def load_config(config_path: Optional[str] = None) -> configparser.ConfigParser:
 # --- Exchange Adapter Factory ---
 def get_exchange_adapter(
     exchange_name: str, config: configparser.ConfigParser
-) -> "ExchangeInterface":  # Forward ref
+) -> "ExchangeInterface":
     from .exchanges.base_interface import (
         ExchangeInterface,
-    )  # Local import for type hint
+    )
 
     adapter_map = _get_adapter_map()
     exchange_name_lower = exchange_name.lower()
@@ -206,7 +194,6 @@ def get_sqlalchemy_engine(
             db_name = current_config["database"]["dbname"]
             db_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
-            # Consider pool settings for production
             engine = create_engine(
                 db_url, pool_pre_ping=True, echo=False, pool_size=5, max_overflow=10
             )
@@ -228,15 +215,11 @@ def get_sqlalchemy_engine(
 def get_db_connection(
     app_config: configparser.ConfigParser,
     new_instance: bool = False,
-    cursor_factory: Optional[Type[PgCursor]] = None,  # Allow specifying cursor factory
+    cursor_factory: Optional[Type[PgCursor]] = None,
 ) -> psycopg2.extensions.connection:
     global _db_conn_psycopg
 
     if not new_instance and _db_conn_psycopg and not _db_conn_psycopg.closed:
-        # Check if existing connection's cursor_factory matches desired, if specified
-        # psycopg2 connections don't directly expose their cursor_factory after creation easily.
-        # For simplicity, if new_instance is False and a connection exists, we return it.
-        # If specific cursor_factory is critical and differs, new_instance=True should be used.
         return _db_conn_psycopg
 
     try:
@@ -247,14 +230,11 @@ def get_db_connection(
             "user": app_config.get("database", "user"),
             "password": app_config.get("database", "password"),
         }
-        # Use provided cursor_factory or default to DictCursor
         db_params["cursor_factory"] = cursor_factory if cursor_factory else DictCursor
 
         conn = psycopg2.connect(**db_params)
         if not new_instance:
-            if (
-                _db_conn_psycopg and not _db_conn_psycopg.closed
-            ):  # Close old shared conn if creating new shared one
+            if _db_conn_psycopg and not _db_conn_psycopg.closed:
                 _db_conn_psycopg.close()
             _db_conn_psycopg = conn
         return conn
@@ -265,9 +245,7 @@ def get_db_connection(
         configparser.NoOptionError,
     ) as e:
         logger.error(f"Database connection error: {e}", exc_info=True)
-        # Return None or raise? Raising might be better for critical connections.
-        # For now, matching original behavior of returning None.
-        return None  # type: ignore
+        return None
 
 
 # --- DB Helper Functions for IDs ---
@@ -299,7 +277,7 @@ def get_or_create_exchange_id(cursor: PgCursor, exchange_name: str) -> int:
                 f"Created new exchange '{exchange_name_lower}' with ID: {new_id}"
             )
             return new_id
-        else:  # Should not happen if RETURNING is used and insert succeeds
+        else:
             raise Exception(
                 f"Failed to create or retrieve exchange_id for {exchange_name_lower} after insert attempt."
             )
@@ -328,9 +306,7 @@ def get_or_create_symbol_id(
         symbol_id = (
             result_row[0] if isinstance(result_row, tuple) else result_row["symbol_id"]
         )
-        # Optionally, verify other fields match or update them
-        # For now, if (exchange_id, instrument_name) matches, assume it's the same symbol.
-        return symbol_id, False  # False means already existed
+        return symbol_id, False
     else:
         try:
             cursor.execute(
@@ -358,16 +334,14 @@ def get_or_create_symbol_id(
                     f"Created new symbol: {exchange_instrument_name_db} (ExID: {exchange_id}) -> "
                     f"StdBase: {standard_base_asset_db}, StdQuote: {standard_quote_asset_db}, Type: {instrument_type_db}. DB SymID: {symbol_id_val}"
                 )
-                return symbol_id_val, True  # True means newly created
-            else:  # Should not happen
+                return symbol_id_val, True
+            else:
                 raise Exception(
                     f"Failed to create symbol {exchange_instrument_name_db} (ExID: {exchange_id}) after attempting insert."
                 )
-        except (
-            psycopg2.Error
-        ) as e:  # Catch DB errors like unique constraint violation if somehow raced
+        except psycopg2.Error as e:
             logger.error(
                 f"Error inserting symbol {exchange_instrument_name_db} (ExID: {exchange_id}): {e}",
                 exc_info=True,
             )
-            raise  # Re-raise after logging
+            raise

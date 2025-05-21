@@ -1,9 +1,8 @@
-# data_ingestion/orderbook_ingestor.py
 import time
 import json
 import signal
 import psycopg2
-import pandas as pd  # For pd.Timestamp check
+import pandas as pd
 import configparser
 from psycopg2.extras import DictCursor
 from datetime import datetime, timezone
@@ -32,8 +31,12 @@ shutdown_flag = False
 
 def signal_handler(signum, frame):
     global shutdown_flag
+    try:
+        sig_name = signal.Signals(signum).name
+    except AttributeError:
+        sig_name = f"Signal {signum}"
     logger.info(
-        f"Signal {signal.Signals(signum).name} received, initiating graceful shutdown for order book collector..."
+        f"{sig_name} received, initiating graceful shutdown for order book collector..."
     )
     shutdown_flag = True
 
@@ -45,21 +48,26 @@ signal.signal(signal.SIGTERM, signal_handler)
 def store_order_book_snapshot(
     db_conn, symbol_id: int, exchange_instrument_name: str, depth_data: Dict[str, Any]
 ) -> bool:
-    current_ingestion_time_utc = datetime.now(
-        timezone.utc
-    )  # This will go into 'ingestion_time'
+    current_ingestion_time_utc = datetime.now(timezone.utc)
+
+    # lastUpdateId is critical and part of PK, must be present.
+    # Check should happen in main_polling_loop before calling this.
     exchange_specific_luid = depth_data.get("lastUpdateId")
+    if exchange_specific_luid is None:
+        logger.error(
+            f"store_order_book_snapshot called with lastUpdateId=None for {exchange_instrument_name}. This should be pre-checked. Skipping."
+        )
+        return False
 
     bids_for_json = []
     for p_raw, s_raw in depth_data.get("bids", []):
         try:
-            # Ensure p_raw and s_raw are strings before Decimal conversion if they are not already
             p = Decimal(str(p_raw))
             s = Decimal(str(s_raw))
-            bids_for_json.append([str(p), str(s)])  # Store as strings in JSON
+            bids_for_json.append([str(p), str(s)])
         except InvalidOperation:
             logger.warning(
-                f"Invalid decimal value in bids for {exchange_instrument_name}: p='{p_raw}', s='{s_raw}'"
+                f"Invalid decimal value in bids for {exchange_instrument_name} (LUID: {exchange_specific_luid}): p='{p_raw}', s='{s_raw}'"
             )
             continue
 
@@ -68,60 +76,47 @@ def store_order_book_snapshot(
         try:
             p = Decimal(str(p_raw))
             s = Decimal(str(s_raw))
-            asks_for_json.append([str(p), str(s)])  # Store as strings in JSON
+            asks_for_json.append([str(p), str(s)])
         except InvalidOperation:
             logger.warning(
-                f"Invalid decimal value in asks for {exchange_instrument_name}: p='{p_raw}', s='{s_raw}'"
+                f"Invalid decimal value in asks for {exchange_instrument_name} (LUID: {exchange_specific_luid}): p='{p_raw}', s='{s_raw}'"
             )
             continue
 
     bids_json = json.dumps(bids_for_json)
     asks_json = json.dumps(asks_for_json)
 
-    # retrieved_at is the timestamp from the exchange for when the snapshot was generated
-    retrieved_at_from_exchange = depth_data.get(
-        "exchange_ts"
-    )  # This is a pd.Timestamp from adapter
+    # 'exchange_ts' (pd.Timestamp or None) comes from adapter.
+    # This is the exchange's event/transaction time if available (e.g., for Futures).
+    # For Spot, it will be None.
+    retrieved_at_from_exchange_payload = depth_data.get("exchange_ts")
 
-    if retrieved_at_from_exchange is None:
-        # This is critical for the partitioning key of order_book_snapshots table
-        logger.error(
-            f"Critical: Exchange timestamp (retrieved_at) is MISSING for orderbook snapshot "
-            f"of {exchange_instrument_name}, LUID {exchange_specific_luid}. "
-            f"This is required for partitioning. Skipping snapshot."
-        )
-        return False  # Must have retrieved_at for PK and partitioning
-
-    if isinstance(retrieved_at_from_exchange, pd.Timestamp):
-        retrieved_at_for_db = retrieved_at_from_exchange.to_pydatetime()
-    elif isinstance(retrieved_at_from_exchange, datetime):
-        retrieved_at_for_db = retrieved_at_from_exchange  # Already datetime
+    retrieved_at_for_db: datetime
+    if retrieved_at_from_exchange_payload is not None:
+        if isinstance(retrieved_at_from_exchange_payload, pd.Timestamp):
+            retrieved_at_for_db = retrieved_at_from_exchange_payload.to_pydatetime()
+        elif isinstance(retrieved_at_from_exchange_payload, datetime):
+            retrieved_at_for_db = retrieved_at_from_exchange_payload
+        else:
+            logger.error(
+                f"Unexpected type for exchange_ts: {type(retrieved_at_from_exchange_payload)} for {exchange_instrument_name}. Using current ingestion time for DB 'retrieved_at'."
+            )
+            retrieved_at_for_db = current_ingestion_time_utc
     else:
-        logger.error(
-            f"Critical: Exchange timestamp (retrieved_at) for {exchange_instrument_name} is of unexpected type: "
-            f"{type(retrieved_at_from_exchange)}. Expected pd.Timestamp or datetime. Skipping."
+        logger.debug(
+            f"Exchange timestamp (exchange_ts) is None for orderbook of {exchange_instrument_name}. Using current ingestion time for DB 'retrieved_at'."
         )
-        return False
+        retrieved_at_for_db = current_ingestion_time_utc
 
-    # Ensure retrieved_at_for_db is timezone-aware (UTC)
     if retrieved_at_for_db.tzinfo is None:
         retrieved_at_for_db = retrieved_at_for_db.replace(tzinfo=timezone.utc)
     else:
         retrieved_at_for_db = retrieved_at_for_db.astimezone(timezone.utc)
 
-    luid_str = (
-        str(exchange_specific_luid) if exchange_specific_luid is not None else None
-    )
-    if luid_str is None:  # lastUpdateId is part of PK and should not be null
-        logger.error(
-            f"Critical: lastUpdateId is MISSING for orderbook snapshot of {exchange_instrument_name} at {retrieved_at_for_db}. Skipping."
-        )
-        return False
+    luid_str = str(exchange_specific_luid)
 
     try:
         with db_conn.cursor() as cursor:
-            # Columns: retrieved_at, symbol_id, last_update_id, bids, asks, ingestion_time
-            # PK: (retrieved_at, symbol_id, last_update_id)
             cursor.execute(
                 """
                 INSERT INTO order_book_snapshots (retrieved_at, symbol_id, last_update_id, bids, asks, ingestion_time)
@@ -132,18 +127,18 @@ def store_order_book_snapshot(
                     ingestion_time = EXCLUDED.ingestion_time; 
                 """,
                 (
-                    retrieved_at_for_db,  # For 'retrieved_at' column (PK, partitioning key)
-                    symbol_id,  # Part of PK
-                    luid_str,  # Part of PK
+                    retrieved_at_for_db,
+                    symbol_id,
+                    luid_str,
                     bids_json,
                     asks_json,
-                    current_ingestion_time_utc,  # For 'ingestion_time' column
+                    current_ingestion_time_utc,
                 ),
             )
             db_conn.commit()
             if cursor.rowcount > 0:
                 logger.debug(
-                    f"Stored order book for {exchange_instrument_name} (LUID: {luid_str}, Retrieved: {retrieved_at_for_db.strftime('%Y-%m-%d %H:%M:%S.%f %Z')})."
+                    f"Stored order book for {exchange_instrument_name} (LUID: {luid_str}, RetrievedDB: {retrieved_at_for_db.strftime('%Y-%m-%d %H:%M:%S.%f %Z')})."
                 )
             return True
     except psycopg2.Error as e:
@@ -153,7 +148,7 @@ def store_order_book_snapshot(
             exc_info=True,
         )
         return False
-    except Exception as e:  # Catch other potential errors like JSON serialization
+    except Exception as e:
         db_conn.rollback()
         logger.error(
             f"Unexpected error storing order book for {exchange_instrument_name} (LUID: {luid_str}): {e}",
@@ -187,15 +182,13 @@ async def main_polling_loop(
             current_depth_data = await exchange_adapter.fetch_orderbook_snapshot(
                 standard_symbol_str=standard_symbol_str, limit=depth_limit
             )
-            # Check for all necessary fields from adapter before attempting to store
+
             if (
                 current_depth_data
-                and current_depth_data.get("bids")
-                is not None  # Bids can be empty list, but key should exist
-                and current_depth_data.get("asks") is not None  # Asks can be empty list
+                and current_depth_data.get("bids") is not None
+                and current_depth_data.get("asks") is not None
                 and current_depth_data.get("lastUpdateId") is not None
-                and current_depth_data.get("exchange_ts") is not None
-            ):  # exchange_ts is crucial now for PK
+            ):
 
                 if store_order_book_snapshot(
                     db_conn, symbol_id, exchange_instrument_name, current_depth_data
@@ -203,21 +196,35 @@ async def main_polling_loop(
                     successful_stores += 1
             else:
                 failed_fetches += 1
+                missing_keys_info = ""
+                if current_depth_data:
+                    missing = []
+                    if current_depth_data.get("bids") is None:
+                        missing.append("bids")
+                    if current_depth_data.get("asks") is None:
+                        missing.append("asks")
+                    if current_depth_data.get("lastUpdateId") is None:
+                        missing.append("lastUpdateId")
+                    if missing:
+                        missing_keys_info = f" Missing keys: {', '.join(missing)}."
+
                 logger.warning(
-                    f"{log_prefix} Failed to fetch valid/complete order book. "
+                    f"{log_prefix} Failed to fetch valid/complete order book.{missing_keys_info} "
                     f"Data (first 200 chars): {str(current_depth_data)[:200]}... Total fails: {failed_fetches}"
                 )
         except Exception as e:
             failed_fetches += 1
-            logger.error(f"{log_prefix} Error during fetch/store: {e}", exc_info=True)
+            logger.error(
+                f"{log_prefix} Error during fetch/store cycle: {e}", exc_info=True
+            )
             if "rate limit" in str(e).lower() or (
                 hasattr(e, "code") and getattr(e, "code") == -1003
-            ):  # Example Binance rate limit code
+            ):
                 logger.warning(
                     f"{log_prefix} Rate limit likely hit, sleeping for 60 seconds..."
                 )
                 try:
-                    await asyncio.sleep(60)  # Backoff
+                    await asyncio.sleep(60)
                 except asyncio.CancelledError:
                     logger.info(
                         f"{log_prefix} Sleep (rate limit backoff) cancelled, shutting down."
@@ -233,17 +240,18 @@ async def main_polling_loop(
             try:
                 await asyncio.sleep(sleep_duration)
             except asyncio.CancelledError:
-                logger.info(f"{log_prefix} Sleep cancelled, shutting down.")
+                logger.info(f"{log_prefix} Main sleep cancelled, shutting down.")
                 break
 
         if (
             successful_stores > 0
             and successful_stores % 100 == 0
-            and successful_stores > (failed_fetches * 2)
-        ):
+            and loop_start_time - (getattr(main_polling_loop, "last_log_time", 0)) > 300
+        ):  # Log progress every ~5 mins if active
             logger.info(
-                f"{log_prefix} Successfully stored {successful_stores} snapshots."
+                f"{log_prefix} Successfully stored {successful_stores} snapshots so far."
             )
+            main_polling_loop.last_log_time = loop_start_time
 
     logger.info(
         f"{log_prefix} Order book collection loop stopped. Total stored: {successful_stores}, Fetch/Store errors: {failed_fetches}"
@@ -265,7 +273,7 @@ if __name__ == "__main__":
         "--symbol",
         type=str,
         default="BTC-USDT",
-        help="Standard trading symbol (e.g., BTC-USDT or BTC-USD-PERP).",
+        help="Standard trading symbol (e.g., BTC-USDT or BTC-USD-PERP). Will be stripped of whitespace.",
     )
     parser.add_argument(
         "--base-asset",
@@ -290,6 +298,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Strip whitespace from symbol argument
+    if args.symbol:
+        args.symbol = args.symbol.strip()
+
     async def main_cli():
         config_object = None
         db_connection = None
@@ -300,7 +312,11 @@ if __name__ == "__main__":
         except FileNotFoundError as e:
             logger.error(f"Configuration error: {e}")
             exit(1)
-        except (KeyError, configparser.NoSectionError, configparser.NoOptionError) as e:
+        except (
+            KeyError,
+            configparser.NoSectionError,
+            configparser.NoOptionError,
+        ) as e:  # More specific config errors
             logger.error(f"Configuration error: {e}")
             exit(1)
 
@@ -314,7 +330,7 @@ if __name__ == "__main__":
                 args.exchange, config_object
             )
             if hasattr(exchange_adapter_instance, "_ensure_cache_populated"):
-                await exchange_adapter_instance._ensure_cache_populated()
+                await exchange_adapter_instance._ensure_cache_populated()  # Crucial for normalize_standard_symbol_to_exchange
             logger.info(
                 f"Successfully connected to DB and initialized {args.exchange.capitalize()} adapter."
             )
@@ -326,26 +342,42 @@ if __name__ == "__main__":
                 exit(1)
 
             base_for_db = (
-                args.base_asset.upper() if args.base_asset else s_repr.base_asset
+                args.base_asset.strip().upper()
+                if args.base_asset
+                else s_repr.base_asset
             )
             quote_for_db = (
-                args.quote_asset.upper() if args.quote_asset else s_repr.quote_asset
+                args.quote_asset.strip().upper()
+                if args.quote_asset
+                else s_repr.quote_asset
             )
-            type_for_db = s_repr.instrument_type
+
+            # Determine DB instrument type
+            type_for_db = s_repr.instrument_type  # Base type from parsed symbol
             if s_repr.instrument_type == FUTURE and s_repr.expiry_date:
                 type_for_db = f"{FUTURE}_{s_repr.expiry_date}"
 
-            if args.instrument_type:
-                arg_type_upper = args.instrument_type.upper()
-                if arg_type_upper.startswith(f"{FUTURE}_") or arg_type_upper in [
+            if args.instrument_type:  # Override with CLI arg if provided
+                arg_type_cleaned = args.instrument_type.strip().upper()
+                if (
+                    arg_type_cleaned.startswith(f"{FUTURE}_")
+                    and len(arg_type_cleaned.split("_")) == 2
+                    and arg_type_cleaned.split("_")[1].isdigit()
+                ):
+                    type_for_db = arg_type_cleaned
+                elif arg_type_cleaned == FUTURE and s_repr.expiry_date:
+                    type_for_db = f"{FUTURE}_{s_repr.expiry_date}"
+                elif arg_type_cleaned in [
                     SPOT,
                     PERP,
-                ]:
-                    type_for_db = arg_type_upper
-                elif arg_type_upper == FUTURE and s_repr.expiry_date:
-                    type_for_db = f"{FUTURE}_{s_repr.expiry_date}"
+                    FUTURE,
+                ]:  # Allow generic FUTURE if no date
+                    type_for_db = arg_type_cleaned
                 else:
-                    type_for_db = arg_type_upper
+                    logger.warning(
+                        f"Using custom instrument type '{arg_type_cleaned}' from --instrument-type."
+                    )
+                    type_for_db = arg_type_cleaned
 
             if not base_for_db or not quote_for_db:
                 logger.error(
@@ -353,7 +385,8 @@ if __name__ == "__main__":
                 )
                 exit(1)
 
-            standard_symbol_for_adapter = args.symbol
+            standard_symbol_for_adapter = args.symbol  # Already stripped
+            exchange_instrument_name_for_db = ""
             try:
                 exchange_instrument_name_for_db = (
                     exchange_adapter_instance.normalize_standard_symbol_to_exchange(
@@ -362,13 +395,14 @@ if __name__ == "__main__":
                 )
             except ValueError as e:
                 logger.error(
-                    f"Failed to normalize standard symbol '{args.symbol}' to exchange format: {e}. Ensure adapter cache is populated or symbol is valid."
+                    f"Failed to normalize standard symbol '{standard_symbol_for_adapter}' to exchange format for {args.exchange}: {e}"
                 )
                 exit(1)
 
             with db_connection.cursor(cursor_factory=DictCursor) as cursor:
                 exchange_id_val = get_or_create_exchange_id(cursor, args.exchange)
-                db_connection.commit()
+                db_connection.commit()  # Commit exchange ID creation
+
                 symbol_id_val, _ = get_or_create_symbol_id(
                     cursor,
                     exchange_id_val,
@@ -377,9 +411,11 @@ if __name__ == "__main__":
                     quote_for_db,
                     type_for_db,
                 )
-                db_connection.commit()
+                db_connection.commit()  # Commit symbol ID creation
 
-            if symbol_id_val is None:
+            if (
+                symbol_id_val is None
+            ):  # Should be caught by exception in get_or_create if it fails
                 logger.error(
                     f"Exiting: Symbol {args.symbol} (Std: {standard_symbol_for_adapter}, Exch: {exchange_instrument_name_for_db}) could not be processed in DB for exchange {args.exchange}."
                 )
@@ -401,10 +437,14 @@ if __name__ == "__main__":
 
         except psycopg2.Error as db_err:
             logger.error(f"A database error occurred: {db_err}", exc_info=True)
-        except ValueError as ve:
-            logger.error(f"Configuration or setup error: {ve}", exc_info=True)
+        except (
+            ValueError
+        ) as ve:  # From load_config, get_exchange_adapter, SymbolRepresentation.parse etc.
+            logger.error(f"Configuration or setup value error: {ve}", exc_info=True)
         except Exception as e:
-            logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+            logger.error(
+                f"An unexpected error occurred in main_cli: {e}", exc_info=True
+            )
         finally:
             if db_connection:
                 db_connection.close()

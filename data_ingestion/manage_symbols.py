@@ -1,4 +1,3 @@
-# data_ingestion/manage_symbols.py
 import argparse
 import psycopg2
 from psycopg2.extras import DictCursor
@@ -13,7 +12,7 @@ from .utils import (
     get_or_create_exchange_id,
     get_or_create_symbol_id,
     DEFAULT_CONFIG_PATH,
-    setup_logging,  # Added
+    setup_logging,
 )
 from .exchanges.base_interface import ExchangeInterface
 
@@ -30,7 +29,6 @@ async def update_symbol_definitions_from_exchange_api(
     )
 
     try:
-        # fetch_exchange_symbols_info already calls _ensure_cache_populated(force_refresh=True)
         all_api_symbols_info = await exchange_adapter.fetch_exchange_symbols_info()
     except Exception as e:
         logger.error(
@@ -53,7 +51,7 @@ async def update_symbol_definitions_from_exchange_api(
 
     with db_conn.cursor(cursor_factory=DictCursor) as cursor:
         exchange_id_val = get_or_create_exchange_id(cursor, exchange_name)
-        db_conn.commit()  # Commit exchange_id creation before loop
+        db_conn.commit()
 
         for i, s_info in enumerate(all_api_symbols_info):
             exchange_instrument_name = s_info.get("exchange_specific_symbol")
@@ -81,7 +79,7 @@ async def update_symbol_definitions_from_exchange_api(
                     exchange_instrument_name,
                     standard_base_asset,
                     standard_quote_asset,
-                    standard_instrument_type,  # This should be the fully specified type
+                    standard_instrument_type,
                 )
                 db_conn.commit()  # Commit after each symbol to save progress
 
@@ -94,7 +92,7 @@ async def update_symbol_definitions_from_exchange_api(
                 db_conn.rollback()
                 logger.error(
                     f"DB Error processing symbol {exchange_instrument_name} ({standard_base_asset}-{standard_quote_asset}-{standard_instrument_type}) for {exchange_name}: {db_e}",
-                    exc_info=False,  # Keep log cleaner for many errors
+                    exc_info=False,
                 )
                 db_error_count += 1
             except Exception as e_upsert:
@@ -145,7 +143,6 @@ if __name__ == "__main__":
         try:
             config_obj = load_config(args.config)
             exchange_adapter_instance = get_exchange_adapter(args.exchange, config_obj)
-            # Adapter's fetch_exchange_symbols_info will handle its own cache population/refresh.
 
             db_connection = get_db_connection(config_obj)
             if db_connection is None:
@@ -156,7 +153,7 @@ if __name__ == "__main__":
                 exchange_adapter_instance, db_connection
             )
 
-        except ValueError as ve:  # Config or setup errors from utils
+        except ValueError as ve:
             logger.error(f"Configuration or setup error: {ve}", exc_info=True)
         except Exception as e:
             logger.error(
