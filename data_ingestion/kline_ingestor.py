@@ -2,10 +2,11 @@ import psycopg2
 import argparse
 import pandas as pd
 from psycopg2.extras import execute_values, DictCursor
-from datetime import datetime as dt, timezone, timedelta
+from datetime import datetime as dt, timezone, timedelta  # dt alias used
 from typing import Optional, List, Tuple, Any
 from decimal import Decimal, InvalidOperation
 import asyncio
+import logging
 
 from .utils import (
     load_config,
@@ -14,8 +15,13 @@ from .utils import (
     get_or_create_exchange_id,
     get_or_create_symbol_id,
     DEFAULT_CONFIG_PATH,
+    setup_logging,
 )
 from .exchanges.base_interface import ExchangeInterface
+from .exchanges.symbol_representation import SymbolRepresentation, FUTURE, PERP, SPOT
+
+
+logger = logging.getLogger(__name__)
 
 
 def store_klines_batch(
@@ -29,122 +35,159 @@ def store_klines_batch(
         return 0
 
     records_to_insert: List[Tuple[Any, ...]] = []
-    for _, kline_row in klines_data_df.iterrows():
+    for _, kline_row in klines_data_df.iterrows():  # kline_row is a pandas Series
         try:
-            open_time_utc = kline_row["time"]  # This is a pd.Timestamp from adapter
-            open_price = kline_row["open"]
-            high_price = kline_row["high"]
-            low_price = kline_row["low"]
-            close_price = kline_row["close"]
-            volume = kline_row["volume"]
+            open_time_utc = kline_row["time"]
+            open_price_raw = kline_row["open"]
+            high_price_raw = kline_row["high"]
+            low_price_raw = kline_row["low"]
+            close_price_raw = kline_row["close"]
+            volume_raw = kline_row["volume"]
 
-            # Standardized column name from adapter is 'quote_volume'
-            quote_asset_volume_val = kline_row.get("quote_volume")
-            if quote_asset_volume_val is None or pd.isna(quote_asset_volume_val):
-                quote_asset_volume_val = Decimal("0.0")  # Default if not provided or NA
-            else:
-                quote_asset_volume_val = (
-                    Decimal(str(quote_asset_volume_val))
-                    if not isinstance(quote_asset_volume_val, Decimal)
-                    else quote_asset_volume_val
-                )
-
-            # Standardized column name from adapter is 'close_timestamp'
-            close_timestamp_val = kline_row.get("close_timestamp")
+            quote_asset_volume_val_raw = kline_row.get("quote_volume")
             if (
-                pd.isna(close_timestamp_val) or close_timestamp_val is None
-            ):  # Handles pd.NaT, None
-                close_timestamp_val = None
-            elif isinstance(
-                close_timestamp_val, pd.Timestamp
-            ):  # Convert to python datetime for psycopg2
-                close_timestamp_val = close_timestamp_val.to_pydatetime()
+                pd.isna(quote_asset_volume_val_raw)
+                or quote_asset_volume_val_raw is None
+            ):
+                quote_asset_volume_val_decimal = Decimal("0.0")
+            elif isinstance(quote_asset_volume_val_raw, Decimal):
+                quote_asset_volume_val_decimal = quote_asset_volume_val_raw
+            else:
+                try:
+                    quote_asset_volume_val_decimal = Decimal(
+                        str(quote_asset_volume_val_raw)
+                    )
+                except InvalidOperation:
+                    logger.warning(
+                        f"Invalid operation converting quote_volume '{quote_asset_volume_val_raw}' to Decimal "
+                        f"for symbol_id {symbol_id} at kline time {open_time_utc}. Defaulting to 0.0."
+                    )
+                    quote_asset_volume_val_decimal = Decimal("0.0")
 
-            # Standardized column name from adapter is 'trade_count'
-            trade_count_val = kline_row.get("trade_count")
+            close_timestamp_val_raw = kline_row.get("close_timestamp")
+            if pd.isna(close_timestamp_val_raw) or close_timestamp_val_raw is None:
+                close_timestamp_val_dt = None
+            elif isinstance(close_timestamp_val_raw, pd.Timestamp):
+                close_timestamp_val_dt = close_timestamp_val_raw.to_pydatetime()
+            else:
+                logger.warning(
+                    f"close_timestamp for symbol_id {symbol_id} at kline time {open_time_utc} is not a pd.Timestamp: {type(close_timestamp_val_raw)}. Attempting conversion."
+                )
+                try:
+                    close_timestamp_val_dt = pd.to_datetime(
+                        close_timestamp_val_raw, utc=True
+                    ).to_pydatetime()
+                except Exception as e_conv:
+                    logger.error(
+                        f"Failed to convert close_timestamp '{close_timestamp_val_raw}' to datetime (Error: {e_conv}). Setting to None."
+                    )
+                    close_timestamp_val_dt = None
+
+            trade_count_val_raw = kline_row.get("trade_count")
+            if pd.isna(trade_count_val_raw) or trade_count_val_raw is None:
+                trade_count_val_int = None
+            else:
+                try:
+                    trade_count_val_int = int(trade_count_val_raw)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        f"Invalid trade_count '{trade_count_val_raw}' for symbol_id {symbol_id} at kline time {open_time_utc}. Setting to None."
+                    )
+                    trade_count_val_int = None
+
+            taker_base_volume_val_raw = kline_row.get("taker_base_volume")
+            if pd.isna(taker_base_volume_val_raw) or taker_base_volume_val_raw is None:
+                taker_base_volume_val_decimal = None
+            elif isinstance(taker_base_volume_val_raw, Decimal):
+                taker_base_volume_val_decimal = taker_base_volume_val_raw
+            else:
+                try:
+                    taker_base_volume_val_decimal = Decimal(
+                        str(taker_base_volume_val_raw)
+                    )
+                except InvalidOperation:
+                    logger.warning(
+                        f"Invalid taker_base_volume '{taker_base_volume_val_raw}' for symbol_id {symbol_id} at kline time {open_time_utc}. Setting to None."
+                    )
+                    taker_base_volume_val_decimal = None
+
+            taker_quote_volume_val_raw = kline_row.get("taker_quote_volume")
             if (
-                pd.isna(trade_count_val) or trade_count_val is None
-            ):  # Handles pd.NA from Int64Dtype, None
-                trade_count_val = None
-
-            # Standardized column name from adapter is 'taker_base_volume'
-            taker_base_volume_val = kline_row.get("taker_base_volume")
-            if taker_base_volume_val is None or pd.isna(taker_base_volume_val):
-                taker_base_volume_val = None  # Nullable in DB
+                pd.isna(taker_quote_volume_val_raw)
+                or taker_quote_volume_val_raw is None
+            ):
+                taker_quote_volume_val_decimal = None
+            elif isinstance(taker_quote_volume_val_raw, Decimal):
+                taker_quote_volume_val_decimal = taker_quote_volume_val_raw
             else:
-                taker_base_volume_val = (
-                    Decimal(str(taker_base_volume_val))
-                    if not isinstance(taker_base_volume_val, Decimal)
-                    else taker_base_volume_val
-                )
-
-            # Standardized column name from adapter is 'taker_quote_volume'
-            taker_quote_volume_val = kline_row.get("taker_quote_volume")
-            if taker_quote_volume_val is None or pd.isna(taker_quote_volume_val):
-                taker_quote_volume_val = None  # Nullable in DB
-            else:
-                taker_quote_volume_val = (
-                    Decimal(str(taker_quote_volume_val))
-                    if not isinstance(taker_quote_volume_val, Decimal)
-                    else taker_quote_volume_val
-                )
+                try:
+                    taker_quote_volume_val_decimal = Decimal(
+                        str(taker_quote_volume_val_raw)
+                    )
+                except InvalidOperation:
+                    logger.warning(
+                        f"Invalid taker_quote_volume '{taker_quote_volume_val_raw}' for symbol_id {symbol_id} at kline time {open_time_utc}. Setting to None."
+                    )
+                    taker_quote_volume_val_decimal = None
 
             if (
                 not isinstance(open_time_utc, pd.Timestamp)
                 or open_time_utc.tzinfo is None
             ):
                 raise ValueError(
-                    "Kline time must be a timezone-aware Pandas Timestamp (UTC)."
+                    f"Kline time for symbol_id {symbol_id} is not a timezone-aware Pandas Timestamp (UTC): {open_time_utc}"
                 )
 
-            # Ensure all numeric values are Decimal (already done by adapter for main ones, but good to ensure for DB)
-            open_price = (
-                Decimal(str(open_price))
-                if not isinstance(open_price, Decimal)
-                else open_price
+            def to_decimal_or_raise(val, field_name, current_open_time):
+                if pd.isna(val) or val is None:
+                    raise ValueError(
+                        f"Essential field '{field_name}' is None/NA for symbol_id {symbol_id} at kline time {current_open_time}"
+                    )
+                if isinstance(val, Decimal):
+                    return val
+                try:
+                    return Decimal(str(val))
+                except InvalidOperation:
+                    raise ValueError(
+                        f"Invalid decimal value for '{field_name}': '{val}' for symbol_id {symbol_id} at kline time {current_open_time}"
+                    )
+
+            open_price_d = to_decimal_or_raise(
+                open_price_raw, "open_price", open_time_utc
             )
-            high_price = (
-                Decimal(str(high_price))
-                if not isinstance(high_price, Decimal)
-                else high_price
+            high_price_d = to_decimal_or_raise(
+                high_price_raw, "high_price", open_time_utc
             )
-            low_price = (
-                Decimal(str(low_price))
-                if not isinstance(low_price, Decimal)
-                else low_price
+            low_price_d = to_decimal_or_raise(low_price_raw, "low_price", open_time_utc)
+            close_price_d = to_decimal_or_raise(
+                close_price_raw, "close_price", open_time_utc
             )
-            close_price = (
-                Decimal(str(close_price))
-                if not isinstance(close_price, Decimal)
-                else close_price
-            )
-            volume = Decimal(str(volume)) if not isinstance(volume, Decimal) else volume
-            # quote_asset_volume_val is already handled
+            volume_d = to_decimal_or_raise(volume_raw, "volume", open_time_utc)
 
             records_to_insert.append(
                 (
-                    open_time_utc.to_pydatetime(),  # Convert pd.Timestamp to python datetime
+                    open_time_utc.to_pydatetime(),
                     symbol_id,
                     interval,
-                    open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    volume,
-                    quote_asset_volume_val,  # Corresponds to DB 'quote_asset_volume'
-                    close_timestamp_val,  # Corresponds to DB 'close_time'
-                    trade_count_val,  # Corresponds to DB 'number_of_trades'
-                    taker_base_volume_val,  # Corresponds to DB 'taker_buy_base_asset_volume'
-                    taker_quote_volume_val,  # Corresponds to DB 'taker_buy_quote_asset_volume'
+                    open_price_d,
+                    high_price_d,
+                    low_price_d,
+                    close_price_d,
+                    volume_d,
+                    quote_asset_volume_val_decimal,
+                    close_timestamp_val_dt,
+                    trade_count_val_int,
+                    taker_base_volume_val_decimal,
+                    taker_quote_volume_val_decimal,
                 )
             )
         except (KeyError, ValueError, TypeError, InvalidOperation) as e:
-            print(
-                f"\nWarning: Skipping malformed kline data for symbol_id {symbol_id} from {exchange_name}: {kline_row}. Error: {e}"
+            problematic_data_str = str(kline_row.to_dict())
+            logger.warning(
+                f"Skipping kline processing for symbol_id {symbol_id} from {exchange_name} due to error: {e}. "
+                f"Problematic kline data (approx): {problematic_data_str[:300]}...",
+                exc_info=False,
             )
-            import traceback  # Temp for debugging
-
-            traceback.print_exc()  # Temp for debugging
             continue
 
     if not records_to_insert:
@@ -176,8 +219,9 @@ def store_klines_batch(
             inserted_count_for_batch = cursor.rowcount
         except psycopg2.Error as e:
             conn.rollback()
-            print(
-                f"\nDB error inserting klines for symbol_id {symbol_id} from {exchange_name}: {e}"
+            logger.error(
+                f"DB error inserting klines for symbol_id {symbol_id} from {exchange_name} (batch size {len(records_to_insert)}): {e}",
+                exc_info=True,
             )
             return 0
     return (
@@ -203,28 +247,55 @@ def get_local_kline_daterange(
             )
             result = cursor.fetchone()
             if result and result["min_db_time"] is not None:
-                min_time_local = result["min_db_time"].replace(tzinfo=timezone.utc)
-                max_time_local = result["max_db_time"].replace(tzinfo=timezone.utc)
+                min_db_time_val = result["min_db_time"]
+                max_db_time_val = result["max_db_time"]
+                min_time_local = (
+                    min_db_time_val.astimezone(timezone.utc)
+                    if min_db_time_val.tzinfo
+                    else min_db_time_val.replace(tzinfo=timezone.utc)
+                )
+                max_time_local = (
+                    max_db_time_val.astimezone(timezone.utc)
+                    if max_db_time_val.tzinfo
+                    else max_db_time_val.replace(tzinfo=timezone.utc)
+                )
     except psycopg2.Error as e:
-        print(f"\nDB Error checking local kline range for symbol_id {symbol_id}: {e}")
+        logger.error(
+            f"DB Error checking local kline range for symbol_id {symbol_id}, interval {interval}: {e}",
+            exc_info=True,
+        )
     return min_time_local, max_time_local
 
 
 def get_interval_timedelta(interval_str: str) -> timedelta:
+    if not interval_str or len(interval_str) < 1:  # Allow 'm', 'h', etc.
+        raise ValueError(f"Invalid interval string: '{interval_str}'")
+
+    unit_part = interval_str[-1].lower()
+    num_part_str = interval_str[:-1]
+
     try:
-        num_part = int(interval_str[:-1])
-        unit_part = interval_str[-1].lower()
-        if unit_part == "m":
-            return timedelta(minutes=num_part)
-        elif unit_part == "h":
-            return timedelta(hours=num_part)
-        elif unit_part == "d":
-            return timedelta(days=num_part)
-        elif unit_part == "w":
-            return timedelta(weeks=num_part)
+        if not num_part_str:  # Handles cases like 'm', 'h' which means 1m, 1h
+            num_part = 1
+        else:
+            num_part = int(num_part_str)
+        if num_part <= 0:
+            raise ValueError("Numeric part of interval must be positive.")
     except ValueError:
-        pass
-    raise ValueError(f"Unsupported interval string for timedelta: {interval_str}")
+        raise ValueError(f"Invalid numeric part in interval string: '{interval_str}'")
+
+    if unit_part == "m":
+        return timedelta(minutes=num_part)
+    elif unit_part == "h":
+        return timedelta(hours=num_part)
+    elif unit_part == "d":
+        return timedelta(days=num_part)
+    elif unit_part == "w":
+        return timedelta(weeks=num_part)
+    else:
+        raise ValueError(
+            f"Unsupported interval unit '{unit_part}' in interval string: '{interval_str}'"
+        )
 
 
 async def fetch_and_store_historical_klines(
@@ -232,40 +303,45 @@ async def fetch_and_store_historical_klines(
     db_conn,
     symbol_id: int,
     standard_symbol_str: str,
-    exchange_instrument_name: str,  # For logging/display purposes
+    exchange_instrument_name: str,
     interval_str: str,
     requested_start_str_dt: str,
     requested_end_str_dt: Optional[str] = None,
-    kline_batch_size: int = 500,  # This parameter is not directly used by fetch_klines, but for chunking if API had limits smaller than full range
+    kline_chunk_size_for_db: int = 500,
 ) -> int:
     total_processed_for_symbol_run = 0
     exchange_name = exchange_adapter.get_exchange_name()
+    log_prefix = f"[{exchange_instrument_name}@{exchange_name} (StdSym:{standard_symbol_str}) Interval:{interval_str}]"
 
     try:
-        req_start_dt = pd.to_datetime(requested_start_str_dt, errors="raise", utc=True)
+        req_start_dt_orig = pd.to_datetime(
+            requested_start_str_dt, errors="raise", utc=True
+        )
     except Exception as e:
-        print(
-            f"\n[{exchange_instrument_name}@{exchange_name}] Invalid start_date format: '{requested_start_str_dt}'. Must be UTC datetime string. Error: {e}"
+        logger.error(
+            f"{log_prefix} Invalid start_date format: '{requested_start_str_dt}'. Error: {e}"
         )
         return 0
 
-    req_end_dt: Optional[pd.Timestamp] = None
+    req_end_dt_orig: Optional[pd.Timestamp] = None
     if requested_end_str_dt:
         try:
-            req_end_dt = pd.to_datetime(requested_end_str_dt, errors="raise", utc=True)
-            if req_end_dt < req_start_dt:
-                print(
-                    f"\n[{exchange_instrument_name}@{exchange_name}] Requested end_date '{requested_end_str_dt}' is before start_date '{requested_start_str_dt}'. Skipping."
+            req_end_dt_orig = pd.to_datetime(
+                requested_end_str_dt, errors="raise", utc=True
+            )
+            if req_end_dt_orig < req_start_dt_orig:
+                logger.warning(
+                    f"{log_prefix} Requested end_date '{requested_end_str_dt}' is before start_date '{requested_start_str_dt}'. Skipping."
                 )
                 return 0
         except Exception as e:
-            print(
-                f"\n[{exchange_instrument_name}@{exchange_name}] Invalid end_date format: '{requested_end_str_dt}'. Error: {e}"
+            logger.error(
+                f"{log_prefix} Invalid end_date format: '{requested_end_str_dt}'. Error: {e}"
             )
             return 0
 
-    print(
-        f"\n[{exchange_instrument_name}@{exchange_name}] Request: Fetch from '{req_start_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}' to '{req_end_dt.strftime('%Y-%m-%d %H:%M:%S %Z') if req_end_dt else 'latest'}' for interval '{interval_str}'."
+    logger.info(
+        f"{log_prefix} Request: Fetch from '{req_start_dt_orig.strftime('%Y-%m-%d %H:%M:%S %Z')}' to '{req_end_dt_orig.strftime('%Y-%m-%d %H:%M:%S %Z') if req_end_dt_orig else 'latest'}'"
     )
 
     min_time_local, max_time_local = get_local_kline_daterange(
@@ -274,179 +350,161 @@ async def fetch_and_store_historical_klines(
     try:
         interval_delta = get_interval_timedelta(interval_str)
     except ValueError as e:
-        print(f"\n[{exchange_instrument_name}@{exchange_name}] {e}. Skipping symbol.")
+        logger.error(f"{log_prefix} {e}. Skipping symbol.")
         return 0
 
-    if min_time_local:
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] Local data found: {min_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')} to {max_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    if min_time_local and max_time_local:
+        logger.info(
+            f"{log_prefix} Local data found: {min_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')} to {max_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
         )
     else:
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] No local data found for this symbol/interval."
+        logger.info(f"{log_prefix} No local data found for this symbol/interval.")
+
+    fetch_segments_to_process: List[
+        Tuple[pd.Timestamp, Optional[pd.Timestamp], str]
+    ] = []
+
+    # Determine segments for backfill
+    if not min_time_local or req_start_dt_orig < min_time_local:
+        effective_end_for_backfill = (
+            min_time_local - interval_delta if min_time_local else None
         )
-
-    fetch_tasks: List[Tuple[pd.Timestamp, Optional[pd.Timestamp], str]] = []
-    api_req_end_dt_param = req_end_dt
-
-    # Logic to determine fetch ranges based on local data and requested range
-    # This part assumes the adapter's fetch_klines can handle a large date range
-    # or that it internally pages. If not, this fetch_and_store_historical_klines
-    # would need to loop and make smaller calls to the adapter.
-    # For now, we'll make one call per "gap" identified.
-
-    current_fetch_start_dt = req_start_dt
-
-    # Task 1: Backfill older data if needed
-    if not min_time_local or req_start_dt < min_time_local:
-        effective_end_for_backfill = api_req_end_dt_param
-        if min_time_local and (
-            api_req_end_dt_param is None or api_req_end_dt_param >= min_time_local
+        if req_end_dt_orig and (
+            effective_end_for_backfill is None
+            or req_end_dt_orig < effective_end_for_backfill
         ):
-            # If fetching to latest or beyond current local data, only backfill up to local start
-            effective_end_for_backfill = min_time_local - interval_delta
+            effective_end_for_backfill = req_end_dt_orig
 
         if (
             effective_end_for_backfill is None
-            or effective_end_for_backfill >= req_start_dt
+            or effective_end_for_backfill >= req_start_dt_orig
         ):
-            fetch_tasks.append(
+            fetch_segments_to_process.append(
                 (
-                    req_start_dt,
+                    req_start_dt_orig,
                     effective_end_for_backfill,
-                    (
-                        "older data (backfill)"
-                        if min_time_local
-                        else "full range (no local data)"
-                    ),
+                    "backfill / initial full range",
                 )
             )
-            if effective_end_for_backfill is not None:
-                current_fetch_start_dt = max(
-                    current_fetch_start_dt, effective_end_for_backfill + interval_delta
-                )
 
-    # Task 2: Fetch newer data if needed
+    # Determine segments for forward-fill
+    start_for_forward_fill = req_start_dt_orig
     if max_time_local:
-        start_for_newer_data_dt = max(
-            max_time_local + interval_delta, current_fetch_start_dt
-        )
-    else:  # No local data yet, means current_fetch_start_dt is req_start_dt
-        start_for_newer_data_dt = current_fetch_start_dt
-        if (
-            fetch_tasks
-        ):  # if full range was already added, this might be redundant or needs adjustment
-            # if full range (req_start_dt to api_req_end_dt_param) was added, this logic is tricky
-            # This logic is simplified, assuming one main call or distinct backfill/forwardfill blocks
-            pass
+        start_for_forward_fill = max(max_time_local + interval_delta, req_start_dt_orig)
 
-    # The fetch_tasks logic needs to be robust against overlaps.
-    # A simpler approach if adapter handles large ranges:
-    # 1. Fetch missing data before min_time_local
-    # 2. Fetch missing data after max_time_local up to req_end_dt (or now)
+    # If a backfill segment was created and ended, ensure forward-fill starts after it
+    if fetch_segments_to_process and fetch_segments_to_process[-1][1] is not None:
+        if start_for_forward_fill <= fetch_segments_to_process[-1][1]:  # type: ignore
+            start_for_forward_fill = fetch_segments_to_process[-1][1] + interval_delta  # type: ignore
 
-    # Simplified fetch_tasks logic (revisiting the original more robust one)
-    fetch_tasks = []  # Resetting for clarity with original logic structure
-    if not min_time_local:  # No local data at all
-        fetch_tasks.append(
-            (req_start_dt, api_req_end_dt_param, "full range (no local data)")
-        )
-    else:  # Local data exists
-        # Fetch older data (backfill)
-        if req_start_dt < min_time_local:
-            backfill_end_dt = min_time_local - interval_delta
-            if backfill_end_dt >= req_start_dt:  # Ensure end is not before start
-                fetch_tasks.append(
-                    (req_start_dt, backfill_end_dt, "older data (backfill)")
-                )
+    now_utc_approx = pd.Timestamp.utcnow()
+    if start_for_forward_fill <= (
+        now_utc_approx + interval_delta
+    ):  # Only if start is not too far in future
+        if req_end_dt_orig is None or req_end_dt_orig >= start_for_forward_fill:
+            # If req_end_dt_orig is None, it's "to latest". If defined, ensure range is valid.
+            desc = (
+                "forward-fill (to latest)"
+                if req_end_dt_orig is None
+                else "forward-fill (to fixed end)"
+            )
+            fetch_segments_to_process.append(
+                (start_for_forward_fill, req_end_dt_orig, desc)
+            )
 
-        # Fetch newer data (forward-fill)
-        # Start fetching from one interval after the latest local data, or from request_start_date if it's later
-        start_for_newer_data_dt = max(max_time_local + interval_delta, req_start_dt)
+    # Basic deduplication and chronological sort
+    unique_fetch_segments = sorted(
+        list(set(fetch_segments_to_process)), key=lambda x: x[0]
+    )
 
-        # Determine the end for this newer data fetch task
-        end_for_newer_data_dt = api_req_end_dt_param  # Could be None (fetch to latest)
+    final_fetch_segments = []
+    for start_dt, end_dt, desc in unique_fetch_segments:
+        if end_dt and start_dt > end_dt:
+            logger.debug(
+                f"{log_prefix} Filtering out invalid segment: Start {start_dt} > End {end_dt} for '{desc}'"
+            )
+            continue
+        if start_dt > (
+            now_utc_approx + interval_delta * 2
+        ):  # Allow some buffer for very recent klines
+            logger.debug(
+                f"{log_prefix} Filtering out future segment: Start {start_dt} for '{desc}'"
+            )
+            continue
+        final_fetch_segments.append((start_dt, end_dt, desc))
 
-        if end_for_newer_data_dt:  # Fixed end date requested
-            if end_for_newer_data_dt >= start_for_newer_data_dt:
-                fetch_tasks.append(
-                    (
-                        start_for_newer_data_dt,
-                        end_for_newer_data_dt,
-                        "newer data (to fixed end)",
-                    )
-                )
-        else:  # Fetching to latest
-            # Only add task if start_for_newer_data is not in the future
-            # Ensure timestamps are comparable (both timezone-aware or both naive)
-            now_utc = pd.Timestamp.utcnow()  # This is already UTC
-            if start_for_newer_data_dt <= now_utc:
-                fetch_tasks.append(
-                    (start_for_newer_data_dt, None, "newer data (to latest)")
-                )
-
-    if not fetch_tasks:
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] All data for the requested range seems to be locally available or request is for future data. No API calls needed now."
+    if not final_fetch_segments:
+        logger.info(
+            f"{log_prefix} All data for the requested range seems to be locally available or request is for future data."
         )
         return 0
 
-    for task_idx, (
-        effective_api_start_dt,
-        effective_api_end_dt,
-        task_desc,
-    ) in enumerate(fetch_tasks):
-        start_log = effective_api_start_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-        end_log = (
-            effective_api_end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-            if effective_api_end_dt
+    for seg_idx, (segment_start_dt, segment_end_dt, segment_desc) in enumerate(
+        final_fetch_segments
+    ):
+        current_fetch_start_dt_for_segment = segment_start_dt
+        segment_fully_fetched = False
+        api_calls_for_segment = 0
+        # Max calls to prevent infinite loop if API/logic error. Adjust if very long history expected in one go.
+        max_api_calls_per_segment = (
+            2000  # e.g. 2000 * 1000 * 1min ~ 1388 days or ~3.8 years of 1m data
+        )
+
+        log_seg_start = segment_start_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        log_seg_end = (
+            segment_end_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            if segment_end_dt
             else "latest"
         )
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1}/{len(fetch_tasks)} ({task_desc}): API From '{start_log}' to '{end_log}'"
+        logger.info(
+            f"{log_prefix} Segment {seg_idx+1}/{len(final_fetch_segments)} ({segment_desc}): API From '{log_seg_start}' to '{log_seg_end}'"
         )
 
-        klines_df_this_task = pd.DataFrame()
-        try:
-            # The adapter's fetch_klines should handle pagination internally if necessary,
-            # or this loop would need to manage it with the `limit` parameter.
-            # Binance adapter's `get_historical_klines` has a limit (default 1000),
-            # but it can be called for a specific date range. If the range implies more than `limit` klines,
-            # it returns up to `limit` from the start of the range.
-            # For true historical backfill over long periods, this function would need to loop,
-            # advancing `effective_api_start_dt` until `effective_api_end_dt` is reached.
-            # The current structure makes one call per identified "gap".
+        while (
+            not segment_fully_fetched
+            and api_calls_for_segment < max_api_calls_per_segment
+        ):
+            api_calls_for_segment += 1
 
-            # Assuming adapter's fetch_klines might return more than default limit if a large range is given
-            # and it handles its own paging if needed. Or, it returns up to 'limit' (e.g., 1000 for Binance).
-            # If it returns only up to adapter's internal limit (e.g. 1000 candles),
-            # then this fetch_and_store logic needs to loop.
-            # For now, assuming the adapter tries to get all klines in the date range specified.
+            # The end datetime for this specific API call within the segment
+            # If segment_end_dt is defined, the adapter (if it's python-binance) will page up to it.
+            # If segment_end_dt is None (fetching to latest), we make one call and then advance our start time.
+            current_api_call_end_dt_param = segment_end_dt
 
-            klines_df_this_task = await exchange_adapter.fetch_klines(
-                standard_symbol_str=standard_symbol_str,
-                interval=interval_str,
-                start_datetime=effective_api_start_dt,
-                end_datetime=effective_api_end_dt,
-                limit=None,  # Let adapter use its default or handle large range (Binance default is 1000)
-                # If we want to control chunks, pass kline_batch_size, but adapter needs to use it for paging
+            logger.debug(
+                f"{log_prefix} API Call #{api_calls_for_segment} for segment: Start {current_fetch_start_dt_for_segment}, End {current_api_call_end_dt_param or 'latest'}"
             )
 
-            if not klines_df_this_task.empty:
-                # The store_klines_batch will insert these. If there are many, it's one large DB transaction.
-                # For extremely large results from fetch_klines (e.g. years of 1m data),
-                # might be better to chunk klines_df_this_task before passing to store_klines_batch.
+            try:
+                klines_df_this_api_call = await exchange_adapter.fetch_klines(
+                    standard_symbol_str=standard_symbol_str,
+                    interval=interval_str,
+                    start_datetime=current_fetch_start_dt_for_segment,
+                    end_datetime=current_api_call_end_dt_param,
+                    limit=None,  # Adapter uses its default batch size (e.g., 1000 for Binance)
+                )
 
-                # Simple chunking if dataframe is too large:
-                if (
-                    len(klines_df_this_task) > kline_batch_size * 1.5
-                ):  # Heuristic to chunk if significantly larger
+                if klines_df_this_api_call.empty:
+                    logger.info(
+                        f"{log_prefix} API Call #{api_calls_for_segment}: No more klines returned. Assuming segment fully fetched or no data in range."
+                    )
+                    segment_fully_fetched = True
+                    break
+
+                # Store fetched klines
+                # ... (DB chunking logic for store_klines_batch)
+                if len(klines_df_this_api_call) > kline_chunk_size_for_db * 1.2:
                     num_chunks = (
-                        len(klines_df_this_task) + kline_batch_size - 1
-                    ) // kline_batch_size
+                        len(klines_df_this_api_call) + kline_chunk_size_for_db - 1
+                    ) // kline_chunk_size_for_db
+                    logger.info(
+                        f"{log_prefix} API Call #{api_calls_for_segment} returned {len(klines_df_this_api_call)} klines. Chunking into {num_chunks} for DB insert."
+                    )
                     for i in range(num_chunks):
-                        chunk_df = klines_df_this_task.iloc[
-                            i * kline_batch_size : (i + 1) * kline_batch_size
+                        chunk_df = klines_df_this_api_call.iloc[
+                            i
+                            * kline_chunk_size_for_db : (i + 1)
+                            * kline_chunk_size_for_db
                         ]
                         if not chunk_df.empty:
                             processed_count_chunk = store_klines_batch(
@@ -457,53 +515,107 @@ async def fetch_and_store_historical_klines(
                                 exchange_name,
                             )
                             total_processed_for_symbol_run += processed_count_chunk
-                            print(
-                                f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}) - Chunk {i+1}/{num_chunks}: API returned {len(chunk_df)} (part of {len(klines_df_this_task)}), DB Processed/Updated: {processed_count_chunk}."
+                            logger.debug(
+                                f"{log_prefix} DB Chunk {i+1}/{num_chunks}: Processed/Updated: {processed_count_chunk}."
                             )
                             if processed_count_chunk > 0:
-                                await asyncio.sleep(0.1)  # Small delay after DB write
-                else:  # Process as a single batch
+                                await asyncio.sleep(0.02)  # Small breath
+                else:
                     processed_count = store_klines_batch(
                         db_conn,
-                        klines_df_this_task,
+                        klines_df_this_api_call,
                         symbol_id,
                         interval_str,
                         exchange_name,
                     )
                     total_processed_for_symbol_run += processed_count
-                    print(
-                        f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}): API returned {len(klines_df_this_task)} klines, DB Processed/Updated: {processed_count}."
+                    logger.info(
+                        f"{log_prefix} API Call #{api_calls_for_segment} returned {len(klines_df_this_api_call)} klines, DB Processed/Updated: {processed_count}."
                     )
                     if processed_count > 0:
-                        await asyncio.sleep(0.1)
-            else:
-                print(
-                    f"[{exchange_instrument_name}@{exchange_name}] Task {task_idx+1} ({task_desc}): No klines returned from API."
-                )
-        except Exception as e:
-            print(
-                f"\nError during {exchange_name} API call or DB store (Task {task_idx+1}, {task_desc}) for {exchange_instrument_name}: {e}"
-            )
-            import traceback
+                        await asyncio.sleep(0.02)
 
-            traceback.print_exc()
-            continue  # Continue to next task if one fails
+                last_kline_time_fetched = klines_df_this_api_call["time"].iloc[-1]
+
+                if segment_end_dt:  # Fetching towards a defined segment end
+                    if last_kline_time_fetched >= segment_end_dt:
+                        logger.info(
+                            f"{log_prefix} Reached or passed segment end date {segment_end_dt}. Segment complete."
+                        )
+                        segment_fully_fetched = True
+                    else:
+                        # python-binance's get_historical_klines with start and end should fetch all in between.
+                        # This loop for defined end_dt is a failsafe or for adapters that don't auto-page fully.
+                        # If python-binance pages correctly, this segment should be fetched in one "API Call" from this loop's perspective.
+                        # If it does, then this `else` block for advancing `current_fetch_start_dt_for_segment` when `segment_end_dt` is set,
+                        # might not be strictly necessary if the adapter handles the full range.
+                        # However, keeping it provides robustness for other adapters or partial fetches.
+                        logger.info(
+                            f"{log_prefix} Fetched up to {last_kline_time_fetched}, segment end is {segment_end_dt}. Assuming adapter handled full range or this was one page."
+                        )
+                        segment_fully_fetched = True  # Assume python-binance fetched all it could for the range.
+                        # If not, the next segment will pick it up if ranges are defined correctly.
+                else:  # Fetching "to latest" (segment_end_dt is None)
+                    # If adapter's fetch_klines with end_datetime=None returns less than its typical max batch,
+                    # assume we've hit the most recent data. (e.g. Binance default limit is 1000)
+                    adapter_max_batch_heuristic = (
+                        990  # Slightly less than typical max (e.g. 1000)
+                    )
+                    if len(klines_df_this_api_call) < adapter_max_batch_heuristic:
+                        logger.info(
+                            f"{log_prefix} Fetched {len(klines_df_this_api_call)} klines (less than heuristic max {adapter_max_batch_heuristic}). Assuming caught up to latest for now."
+                        )
+                        segment_fully_fetched = True
+                    else:
+                        current_fetch_start_dt_for_segment = (
+                            last_kline_time_fetched + interval_delta
+                        )
+                        # Safety: don't let next start time go too far into the future
+                        if current_fetch_start_dt_for_segment > (
+                            pd.Timestamp.utcnow() + interval_delta * 5
+                        ):  # Allow 5 intervals buffer
+                            logger.warning(
+                                f"{log_prefix} Next fetch start {current_fetch_start_dt_for_segment} is too far in the future. Stopping segment."
+                            )
+                            segment_fully_fetched = True
+
+                if segment_fully_fetched:
+                    break
+
+                await asyncio.sleep(
+                    0.1
+                )  # Small delay between paged API calls if looping within segment
+
+            except Exception as e_apicall:
+                logger.error(
+                    f"{log_prefix} Error during API call #{api_calls_for_segment} or DB store for segment: {e_apicall}",
+                    exc_info=True,
+                )
+                await asyncio.sleep(5)  # Longer delay on error
+                break  # Exit while loop for this segment on error, move to next segment or finish.
+
+        if api_calls_for_segment >= max_api_calls_per_segment:
+            logger.warning(
+                f"{log_prefix} Reached max API calls ({max_api_calls_per_segment}) for segment. Moving on or finishing."
+            )
 
     if total_processed_for_symbol_run > 0:
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] Completed. Total DB klines processed/updated: {total_processed_for_symbol_run}."
+        logger.info(
+            f"{log_prefix} Run Completed. Total DB klines processed/updated for this run: {total_processed_for_symbol_run}."
         )
     else:
-        print(
-            f"[{exchange_instrument_name}@{exchange_name}] Completed. No new klines inserted/updated."
+        logger.info(
+            f"{log_prefix} Run Completed. No new klines inserted/updated for this run."
         )
     return total_processed_for_symbol_run
 
 
 if __name__ == "__main__":
+    setup_logging()
     parser = argparse.ArgumentParser(
         description="Download klines using exchange adapters."
     )
+    # ... (Argument parsing remains the same as your last correct version) ...
     parser.add_argument(
         "--config",
         type=str,
@@ -522,24 +634,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base-asset",
         type=str,
-        help="Standard base asset (e.g., BTC). Optional if symbol provides it.",
+        help="Standard base asset (e.g., BTC). Optional, derived from --symbol if not provided.",
     )
     parser.add_argument(
         "--quote-asset",
         type=str,
-        help="Standard quote asset (e.g., USDT or USD). Optional if symbol provides it.",
+        help="Standard quote asset (e.g., USDT or USD). Optional, derived from --symbol if not provided.",
     )
     parser.add_argument(
         "--instrument-type",
         type=str,
-        default="SPOT",
-        help="Instrument type (SPOT, PERP, FUTURE). Optional if symbol provides it (e.g. BTC-USD-PERP).",
+        help=f"Instrument type ({SPOT}, {PERP}, {FUTURE}). Optional, derived from --symbol or defaults to SPOT.",
     )
     parser.add_argument(
         "--interval", type=str, default="1m", help="Kline interval (e.g., 1m, 5m, 1h)."
     )
     parser.add_argument(
-        "--start-date", type=str, required=True, help="Kline start date/datetime (UTC)."
+        "--start-date",
+        type=str,
+        required=True,
+        help="Kline start date/datetime (UTC, e.g., YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ).",
     )
     parser.add_argument(
         "--end-date",
@@ -557,132 +671,139 @@ if __name__ == "__main__":
         try:
             config_object = load_config(args.config)
         except FileNotFoundError as e:
-            print(f"Configuration Error: {e}")
+            logger.error(f"Configuration File Error: {e}")
             exit(1)
-        except KeyError as e:
-            print(f"Configuration error: Missing key {e}")
+        except (KeyError, configparser.NoSectionError, configparser.NoOptionError) as e:
+            logger.error(f"Configuration Key/Section Error: {e}")
             exit(1)
 
-        kline_db_batch_size_cfg = int(  # Renamed to avoid conflict with function param
+        kline_db_chunk_size_cfg = int(
             config_object.get("settings", "kline_fetch_batch_size", fallback="500")
         )
 
         try:
             db_connection = get_db_connection(config_object)
             if db_connection is None:
-                print("Failed to connect to the database. Exiting.")
+                logger.error("Failed to connect to the database. Exiting.")
                 exit(1)
 
             exchange_adapter_instance = get_exchange_adapter(
                 args.exchange, config_object
             )
-            # Ensure exchange adapter's internal cache is populated for symbol normalization
             if hasattr(exchange_adapter_instance, "_ensure_cache_populated"):
                 await exchange_adapter_instance._ensure_cache_populated()
-
-            print(
+            logger.info(
                 f"Successfully connected to DB and initialized {args.exchange.capitalize()} adapter."
             )
 
-            from .exchanges.symbol_representation import (
-                SymbolRepresentation,
-            )  # Local import for script context
+            try:
+                s_repr = SymbolRepresentation.parse(args.symbol)
+            except ValueError as e:
+                logger.error(f"Invalid --symbol argument '{args.symbol}': {e}")
+                exit(1)
 
-            s_repr = SymbolRepresentation.parse(args.symbol)
-            base_for_db = s_repr.base_asset
-            quote_for_db = s_repr.quote_asset
+            base_for_db = (
+                args.base_asset.upper() if args.base_asset else s_repr.base_asset
+            )
+            quote_for_db = (
+                args.quote_asset.upper() if args.quote_asset else s_repr.quote_asset
+            )
+
             type_for_db = s_repr.instrument_type
-            # For DB storage, future type might be stored as FUTURE_YYMMDD or just FUTURE
-            # get_or_create_symbol_id expects FUTURE_YYMMDD if expiry is present
-            if s_repr.instrument_type == "FUTURE" and s_repr.expiry_date:
-                type_for_db = f"FUTURE_{s_repr.expiry_date}"
+            if s_repr.instrument_type == FUTURE and s_repr.expiry_date:
+                type_for_db = f"{FUTURE}_{s_repr.expiry_date}"
 
-            if args.base_asset:
-                base_for_db = args.base_asset.upper()
-            if args.quote_asset:
-                quote_for_db = args.quote_asset.upper()
-
-            # Instrument type override from args
             if args.instrument_type:
                 arg_instrument_type_upper = args.instrument_type.upper()
                 if (
-                    arg_instrument_type_upper.startswith("FUTURE")
-                    and s_repr.expiry_date
+                    arg_instrument_type_upper.startswith(f"{FUTURE}_")
+                    and len(arg_instrument_type_upper.split("_")) == 2
+                    and arg_instrument_type_upper.split("_")[1].isdigit()
                 ):
-                    # If arg is FUTURE and symbol had expiry, ensure it's FUTURE_YYMMDD
-                    type_for_db = f"FUTURE_{s_repr.expiry_date}"
-                elif arg_instrument_type_upper == "PERP":
-                    type_for_db = "PERP"
-                elif arg_instrument_type_upper == "SPOT":
-                    type_for_db = "SPOT"
-                else:  # Generic type from arg if not matching specific structures
+                    type_for_db = arg_instrument_type_upper
+                elif arg_instrument_type_upper == FUTURE and s_repr.expiry_date:
+                    type_for_db = f"{FUTURE}_{s_repr.expiry_date}"
+                elif arg_instrument_type_upper in [SPOT, PERP]:
+                    type_for_db = arg_instrument_type_upper
+                elif arg_instrument_type_upper == FUTURE and not s_repr.expiry_date:
+                    logger.warning(
+                        f"--instrument-type=FUTURE provided but --symbol '{args.symbol}' has no expiry date. Storing as generic FUTURE type."
+                    )
+                    type_for_db = FUTURE
+                else:
+                    logger.warning(
+                        f"Using '{arg_instrument_type_upper}' from --instrument-type. Ensure this is a valid storable type if it differs from parsed symbol."
+                    )
                     type_for_db = arg_instrument_type_upper
 
             if not base_for_db or not quote_for_db:
-                print(
-                    f"Error: Could not determine standard base and quote assets from --symbol '{args.symbol}' or --base-asset/--quote-asset arguments."
+                logger.error(
+                    f"Could not determine standard base and quote assets from --symbol '{args.symbol}' or other arguments."
                 )
                 exit(1)
 
-            exchange_instrument_name_for_db = (
-                exchange_adapter_instance.normalize_standard_symbol_to_exchange(
-                    args.symbol  # Pass the standard symbol string here
+            exchange_instrument_name_for_db = ""
+            try:
+                exchange_instrument_name_for_db = (
+                    exchange_adapter_instance.normalize_standard_symbol_to_exchange(
+                        args.symbol
+                    )
                 )
-            )
+            except ValueError as e:
+                logger.error(
+                    f"Failed to normalize standard symbol '{args.symbol}' to exchange format: {e}. Ensure adapter cache is populated or symbol is valid for the exchange."
+                )
+                exit(1)
 
             with db_connection.cursor(cursor_factory=DictCursor) as cursor:
                 exchange_id_val = get_or_create_exchange_id(cursor, args.exchange)
                 db_connection.commit()
 
-                symbol_id_val, _ = get_or_create_symbol_id(
+                symbol_id_val, created = get_or_create_symbol_id(
                     cursor,
                     exchange_id_val,
-                    exchange_instrument_name_for_db,  # This is exchange specific name
-                    base_for_db,  # Standard base
-                    quote_for_db,  # Standard quote
-                    type_for_db,  # Standard type (e.g. SPOT, PERP, FUTURE_YYMMDD)
+                    exchange_instrument_name_for_db,
+                    base_for_db,
+                    quote_for_db,
+                    type_for_db,
                 )
                 db_connection.commit()
 
             if symbol_id_val is None:
-                print(
-                    f"Could not process symbol {args.symbol} (std: {base_for_db}-{quote_for_db}-{type_for_db}, exch: {exchange_instrument_name_for_db}) in DB for exchange {args.exchange}. Exiting."
+                logger.error(
+                    f"Could not get/create symbol_id for {args.symbol} (Std: {base_for_db}-{quote_for_db}-{type_for_db}, Exch: {exchange_instrument_name_for_db}). Exiting."
                 )
                 exit(1)
 
-            print(
-                f"Targeting Standard Symbol: {args.symbol} (Exchange: {args.exchange}, Instrument: {exchange_instrument_name_for_db}, DB ID: {symbol_id_val})"
+            logger.info(
+                f"Targeting Standard Symbol: {args.symbol} (Exchange: {args.exchange}, Exchange Instrument: {exchange_instrument_name_for_db}, DB ID: {symbol_id_val})"
             )
 
             await fetch_and_store_historical_klines(
                 exchange_adapter_instance,
                 db_connection,
                 symbol_id_val,
-                args.symbol,  # Pass the standard symbol string for adapter
-                exchange_instrument_name_for_db,  # For logging
+                args.symbol,
+                exchange_instrument_name_for_db,
                 args.interval,
                 args.start_date,
                 args.end_date,
-                kline_db_batch_size_cfg,  # Pass the batch size from config
+                kline_db_chunk_size_cfg,
             )
         except psycopg2.Error as db_err:
-            print(f"Database error: {db_err}")
+            logger.error(f"Database error: {db_err}", exc_info=True)
         except ValueError as ve:
-            print(f"Value error: {ve}")
+            logger.error(f"Value error: {ve}", exc_info=True)
         except Exception as e:
-            print(f"Unexpected error: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error(f"Unexpected error in kline ingestor CLI: {e}", exc_info=True)
         finally:
             if db_connection:
                 db_connection.close()
-                print("Database connection closed.")
+                logger.info("Database connection closed.")
             if exchange_adapter_instance and hasattr(
                 exchange_adapter_instance, "close_session"
             ):
                 await exchange_adapter_instance.close_session()
-                print(f"{args.exchange.capitalize()} adapter session closed.")
-            print("Kline data fetching script finished.")
+            logger.info("Kline data fetching script finished.")
 
     asyncio.run(main_cli())

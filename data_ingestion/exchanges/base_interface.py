@@ -1,3 +1,4 @@
+# data_ingestion/exchanges/base_interface.py
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import List, Dict, Any, Optional
@@ -80,16 +81,19 @@ class ExchangeInterface(ABC):
         """
         Converts your internal standard symbol string to the exchange-specific format.
         Should primarily use an internal cache populated by fetch_exchange_symbols_info.
+        If cache is not populated, this method might raise an error or attempt a less reliable direct conversion.
+        It's recommended to ensure the cache is populated before calling this method extensively.
         """
         pass
 
     @abstractmethod
-    def normalize_exchange_symbol_to_standard(
+    async def normalize_exchange_symbol_to_standard(
         self, exchange_specific_symbol: str, instrument_type_hint: Optional[str] = None
     ) -> str:
         """
         Converts an exchange-specific symbol string to your internal standard format.
-        Should primarily use an internal cache populated by fetch_exchange_symbols_info.
+        Requires the internal cache (populated by fetch_exchange_symbols_info) to be available.
+        This method is async to allow for cache population if necessary.
         """
         pass
 
@@ -118,7 +122,5 @@ class ExchangeInterface(ABC):
 
     async def close_session(self):
         """Clean up any persistent resources, like HTTP client sessions."""
-        print(
-            f"Closing session for {self.get_exchange_name()} adapter (if applicable)."
-        )
+        # Default implementation does nothing. Adapters can override.
         pass
