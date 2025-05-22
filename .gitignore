@@ -17,3 +17,7 @@ dist/
 
 # macOS
 .DS_Store
+
+
+# config
+config/con

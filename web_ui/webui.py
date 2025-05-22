@@ -1,4 +1,3 @@
-# File: web_ui/webui.py
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_httpauth import HTTPBasicAuth
 import psycopg2
@@ -22,7 +21,6 @@ if not os.path.exists(CONFIG_FILE):
             f"Warning: Used fallback config path from CWD: {CONFIG_FILE}"
         )
     else:
-        # This will be an issue if app.logger isn't available yet, print instead
         print(
             f"CRITICAL ERROR: Config file not found. Checked primary: {os.path.join(PROJECT_ROOT_DIR, 'config', 'config.ini')} and CWD fallback: {alt_config_file_from_cwd}"
         )
@@ -32,9 +30,8 @@ if not os.path.exists(CONFIG_FILE):
 config = configparser.ConfigParser()
 config.read(CONFIG_FILE)
 
-app.secret_key = os.urandom(
-    24
-)  # TODO: using a fixed secret for dev or environment variable for prod
+# TODO: using a fixed secret for dev or environment variable for prod
+app.secret_key = os.urandom(24)
 auth = HTTPBasicAuth()
 
 # --- AGGREGATED_INTERVALS_MAP ---
@@ -236,15 +233,15 @@ def get_dataset_overview_stats():
                         )
                         current_stat["count"] = "Source Missing"
                         stats["kline_stats_by_interval"][key] = current_stat
-                        continue  # Skip to next interval if source doesn't exist
+                        continue
 
                     if key == "1m":
                         cur.execute(
                             """
                             SELECT SUM(kline_1m_count) as total_count, 
-                                   MIN(first_1m_kline_time) as overall_min_time, 
-                                   MAX(last_1m_kline_time) as overall_max_time 
-                            FROM symbol_1m_kline_counts
+                                   MIN(first_1m_kline_time_utc) as overall_min_time, 
+                                   MAX(last_1m_kline_time_utc) as overall_max_time 
+                            FROM symbol_1m_kline_stats 
                             WHERE kline_1m_count > 0; 
                         """
                         )
@@ -282,7 +279,7 @@ def get_dataset_overview_stats():
                     stats["kline_stats_by_interval"][key] = current_stat
 
             cur.execute(
-                "SELECT COUNT(*) as count, MIN(time) as min_time, MAX(time) as max_time FROM order_book_snapshots;"
+                "SELECT COUNT(*) as count, MIN(retrieved_at) as min_time, MAX(retrieved_at) as max_time FROM order_book_snapshots;"
             )
             ob_res = cur.fetchone()
             if ob_res:
@@ -319,7 +316,7 @@ def get_plot_data_quote_asset_distribution(conn):
 
 def get_plot_data_top_symbols_by_klines(conn, limit=10):
     labels, data = [], []
-    mv_name = "symbol_1m_kline_counts"
+    mv_name = "symbol_1m_kline_stats"
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -329,7 +326,7 @@ def get_plot_data_top_symbols_by_klines(conn, limit=10):
                 );
             """,
                 (mv_name,),
-            )  # Specifically check for materialized view 'm'
+            )
             if not cur.fetchone()[0]:
                 app.logger.warning(
                     f"Materialized view '{mv_name}' not found for top symbols plot."
@@ -360,8 +357,8 @@ def get_plot_data_daily_ingestion_counts(conn, data_type, days=30):
     labels, data_values = [], []
 
     view_name_map = {
-        "klines_1m": "daily_1m_klines_ingested_stats",
-        "snapshots": "daily_order_book_snapshots_ingested_stats",
+        "klines_1m": "daily_1m_klines_ingestion_stats",
+        "snapshots": "daily_orderbook_ingestion_stats",
     }
     view_name = view_name_map.get(data_type)
 
@@ -378,7 +375,7 @@ def get_plot_data_daily_ingestion_counts(conn, data_type, days=30):
                 );
             """,
                 (view_name,),
-            )  # Check if the specific MV exists
+            )
             if not cur.fetchone()[0]:
                 app.logger.warning(
                     f"Materialized view '{view_name}' not found for daily {data_type} plot."
@@ -389,10 +386,10 @@ def get_plot_data_daily_ingestion_counts(conn, data_type, days=30):
             start_date_inclusive = end_date_exclusive - timedelta(days=days)
 
             query = f"""
-                SELECT day_bucket, daily_count
+                SELECT ingestion_day_utc AS day_bucket, daily_ingested_count AS daily_count
                 FROM {view_name}
-                WHERE day_bucket >= %s AND day_bucket < %s
-                ORDER BY day_bucket ASC;
+                WHERE ingestion_day_utc >= %s AND ingestion_day_utc < %s
+                ORDER BY ingestion_day_utc ASC;
             """
             cur.execute(query, (start_date_inclusive, end_date_exclusive))
 
@@ -429,6 +426,7 @@ def get_kline_stats_for_symbol(symbol_id):
         return stats
     try:
         with conn.cursor() as cur:
+            # Raw 1m stats are from the 'klines' table directly
             cur.execute(
                 "SELECT COUNT(*) as count, MIN(time) as min_time, MAX(time) as max_time FROM klines WHERE symbol_id = %s AND interval = '1m';",
                 (symbol_id,),
@@ -441,6 +439,7 @@ def get_kline_stats_for_symbol(symbol_id):
                 stats["raw_1m_min_time"] = raw_stats_res["min_time"]
                 stats["raw_1m_max_time"] = raw_stats_res["max_time"]
 
+            # Aggregate stats from continuous aggregates
             for key, info in AGGREGATED_INTERVALS_MAP.items():
                 if info["is_aggregate"]:
                     agg_stat = {
@@ -459,7 +458,7 @@ def get_kline_stats_for_symbol(symbol_id):
                             );
                         """,
                             (table_or_view,),
-                        )  # Check for 'm' (materialized view) or 'v' (regular view)
+                        )
                         if cur.fetchone()[0]:
                             cur.execute(
                                 f"SELECT COUNT(*) as count, MIN({time_col}) as min_time, MAX({time_col}) as max_time FROM {table_or_view} WHERE symbol_id = %s;",
@@ -509,7 +508,7 @@ def get_latest_kline_timestamp(conn, symbol_id, interval_key):
                 );
             """,
                 (table_or_view,),
-            )  # 'r' table, 'p' partitioned, 'v' view, 'm' mat view, 'f' foreign
+            )
             if not cur.fetchone()[0]:
                 app.logger.warning(
                     f"Table/View '{table_or_view}' for latest timestamp check does not exist."
@@ -543,7 +542,7 @@ def get_order_book_stats_for_symbol(symbol_id):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) as count, MIN(time) as min_time, MAX(time) as max_time FROM order_book_snapshots WHERE symbol_id = %s;",
+                "SELECT COUNT(*) as count, MIN(retrieved_at) as min_time, MAX(retrieved_at) as max_time FROM order_book_snapshots WHERE symbol_id = %s;",
                 (symbol_id,),
             )
             db_stats = cur.fetchone()
@@ -623,10 +622,9 @@ def view_klines():
     query_error = None
 
     default_end_dt = datetime.now(timezone.utc)
-    # Determine default lookback based on selected interval or a general default
     current_interval_info_temp = AGGREGATED_INTERVALS_MAP.get(
         selected_interval_key, AGGREGATED_INTERVALS_MAP["1h"]
-    )  # Fallback to 1h for default lookback
+    )
     default_lookback_td = current_interval_info_temp.get(
         "default_lookback", timedelta(days=7)
     )
@@ -653,24 +651,43 @@ def view_klines():
         )
     elif not selected_symbol_id and symbols:
         selected_symbol_id = symbols[0]["symbol_id"]
-        # If symbol changes via dropdown, reset date inputs to defaults for that interval
-        if request.args.get("symbol_id"):  # Indicates symbol was explicitly changed
-            conn_temp = get_db_connection()
-            latest_data_ts = None
-            if conn_temp:
-                latest_data_ts = get_latest_kline_timestamp(
-                    conn_temp, selected_symbol_id, selected_interval_key
-                )
-                conn_temp.close()
+        conn_temp = get_db_connection()
+        latest_data_ts = None
+        if conn_temp:
+            latest_data_ts = get_latest_kline_timestamp(
+                conn_temp, selected_symbol_id, selected_interval_key
+            )
+            conn_temp.close()
 
-            effective_end_dt = (
-                latest_data_ts if latest_data_ts else datetime.now(timezone.utc)
+        effective_end_dt = (
+            latest_data_ts if latest_data_ts else datetime.now(timezone.utc)
+        )
+        effective_start_dt = effective_end_dt - current_view_info.get(
+            "default_lookback", timedelta(days=30)
+        )
+        start_time_for_input = effective_start_dt.strftime("%Y-%m-%dT%H:%M")
+        end_time_for_input = effective_end_dt.strftime("%Y-%m-%dT%H:%M")
+
+    if request.args.get("symbol_id"):
+        selected_symbol_id = request.args.get("symbol_id", type=int)
+        conn_temp = get_db_connection()
+        latest_data_ts = None
+        if conn_temp and selected_symbol_id:
+            latest_data_ts = get_latest_kline_timestamp(
+                conn_temp, selected_symbol_id, selected_interval_key
             )
-            effective_start_dt = effective_end_dt - current_view_info.get(
-                "default_lookback", timedelta(days=30)
-            )
-            start_time_for_input = effective_start_dt.strftime("%Y-%m-%dT%H:%M")
-            end_time_for_input = effective_end_dt.strftime("%Y-%m-%dT%H:%M")
+            conn_temp.close()
+
+        effective_end_dt = (
+            latest_data_ts if latest_data_ts else datetime.now(timezone.utc)
+        )
+        current_interval_default_lookback = AGGREGATED_INTERVALS_MAP[
+            selected_interval_key
+        ].get("default_lookback", timedelta(days=30))
+        effective_start_dt = effective_end_dt - current_interval_default_lookback
+
+        start_time_for_input = effective_start_dt.strftime("%Y-%m-%dT%H:%M")
+        end_time_for_input = effective_end_dt.strftime("%Y-%m-%dT%H:%M")
 
     if selected_symbol_id:
         kline_stats = get_kline_stats_for_symbol(selected_symbol_id)
@@ -718,21 +735,28 @@ def view_klines():
                             klines_data = []
                         else:
                             sql_params = [
-                                selected_symbol_id,
-                                query_start_time_dt,
-                                query_end_time_dt,
-                                limit,
+                                selected_symbol_id,  # param 1
+                                query_start_time_dt,  # param 2 (or 3 if interval)
+                                query_end_time_dt,  # param 3 (or 4 if interval)
+                                limit,  # param 4 (or 5 if interval)
                             ]
                             interval_filter_sql = ""
-                            if not current_view_info["is_aggregate"]:
+                            if not current_view_info[
+                                "is_aggregate"
+                            ]:  # Raw 'klines' table
                                 interval_filter_sql = "AND interval = %s "
-                                sql_params.insert(1, selected_interval_key)
+                                sql_params.insert(
+                                    1, selected_interval_key
+                                )  # interval is 2nd param now
+
+                            # Note: For SQL query, %s needs to be correctly ordered with sql_params
                             sql_query = f"""
                                 SELECT {time_column} AS time, {open_col} AS open_price, {high_col} AS high_price, 
                                        {low_col} AS low_price, {close_col} AS close_price, volume, {trades_col} AS number_of_trades 
                                 FROM {table_or_view_name} 
                                 WHERE symbol_id = %s {interval_filter_sql} AND {time_column} >= %s AND {time_column} <= %s 
-                                ORDER BY {time_column} DESC LIMIT %s """
+                                ORDER BY {time_column} DESC LIMIT %s """  # Parameters are symbol_id, [interval], start, end, limit
+
                             cur.execute(sql_query, tuple(sql_params))
                             klines_data = cur.fetchall()
                     if klines_data:
@@ -809,15 +833,17 @@ def view_order_book():
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """SELECT obs.time, obs.last_update_id, obs.bids, obs.asks, s.instrument_name 
+                        """SELECT obs.retrieved_at AS time, obs.last_update_id, obs.bids, obs.asks, s.instrument_name 
                            FROM order_book_snapshots obs JOIN symbols s ON obs.symbol_id = s.symbol_id 
-                           WHERE obs.symbol_id = %s ORDER BY obs.time DESC LIMIT %s""",
+                           WHERE obs.symbol_id = %s ORDER BY obs.retrieved_at DESC LIMIT %s""",
                         (selected_symbol_id, history_count),
                     )
                     snapshots_raw = cur.fetchall()
                     if snapshots_raw:
                         for row_raw in snapshots_raw:
-                            snapshot_item = dict(row_raw)
+                            snapshot_item = dict(
+                                row_raw
+                            )  # 'time' key will now have the retrieved_at value
                             snapshot_item["bids"] = (
                                 json.loads(snapshot_item["bids"])
                                 if isinstance(snapshot_item["bids"], str)
