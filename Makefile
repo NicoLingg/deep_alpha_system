@@ -178,7 +178,7 @@ setup-db: up init-db
 
 down:
 	@echo "Stopping and removing TimescaleDB container and related volumes..."
-	$(DOCKER_COMPOSE) down -v # -v removes volumes defined in docker-compose.yml
+	$(DOCKER_COMPOSE) down
 
 logs:
 	$(DOCKER_COMPOSE) logs -f timescaledb
