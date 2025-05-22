@@ -1,0 +1,43 @@
+[database]
+host = localhost
+port = 5433 
+dbname = deep_alpha_data_db 
+user = deep_alpha_user 
+password = your_strong_password_here
+
+[webui_auth]
+username = user 
+password = your_strong_password_here 
+
+[binance]
+#  Not needed for public data
+api_key = YOUR_BINANCE_API_KEY_IF_NEEDED_FOR_HIGHER_LIMITS 
+api_secret = YOUR_BINANCE_API_SECRET_IF_NEEDED
+
+[settings]
+# Number of kline records to insert into the database in a single transaction batch.
+kline_fetch_batch_size = 1000
+
+
+[ingestion]
+# Max concurrent workers for fetching kline data
+max_workers = 24
+# Default start date for kline ingestion if not specified by command line
+default_start_date = 2017-01-01
+# Delay in seconds EACH worker waits before starting to fetch a new symbol. Helps distribute API calls.
+worker_symbol_delay = 0.5 
+# Default kline interval for populate-data if not specified
+default_kline_interval = 1m
+# Default quote asset filter for Stage 2 (populate_db.py) if --db-quote-asset is not used. Can be blank for no default filter.
+default_db_quote_asset_filter = USDT 
+
+
+[symbol_management]
+# default_kline_fetch_api_status_filter is for populate_db.py
+default_kline_fetch_api_status_filter = TRADING_ONLY 
+
+# New defaults for manage_symbols.py (symbol definitions)
+default_api_status_filter_for_definitions = TRADING_ONLY
+default_quote_asset_filter_for_definitions = USDT
+default_instrument_type_filter_for_definitions = SPOT
+default_symbols_list_filter_for_definitions =
