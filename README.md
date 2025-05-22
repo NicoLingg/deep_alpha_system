@@ -1,7 +1,7 @@
 # Deep Alpha System
 
 <p align="center">
-  <img src="assets/logo.png" alt="Deep Alpha System Logo" width="250">
+  <img src="docs/assets/logo.png" alt="Deep Alpha System Logo" width="250">
 </p>
 
 **Deep Alpha System** serves as an exploratory environment for those looking to delve into machine learning applications for financial markets and gain hands-on experience with the components of a quantitative trading pipeline. It provides a practical framework for collecting, storing, and analyzing market data (initially from Binance) as a basis for developing and evaluating trading strategies.
@@ -79,6 +79,10 @@ The system includes a modular and configurable pipeline for generating financial
     *   `utils.py`: Shared utility functions.
     *   `symbol_utils.py`: Utilities like finding top liquid symbols.
 *   `db/`: SQL schema definitions (`schema.sql`), including tables, hypertables, continuous aggregates, and materialized views.
+*   `docs/`: **Contains detailed documentation, tutorials, and guides.**
+    *   `assets/`: Images and other static assets for documentation.
+    *   `01_quick_start.md`: Your first stop for getting the system running.
+    *   ... (other guides for data ingestion, feature engineering, etc.)
 *   `feature_engineering/`: Python scripts and configuration for calculating financial features.
     *   `generator.py`: Main script to orchestrate feature calculation.
     *   `calculators/`: Directory containing feature calculator implementations.
@@ -92,8 +96,13 @@ The system includes a modular and configurable pipeline for generating financial
 *   `Makefile`: For automating common tasks.
 *   `docker-compose.yml`: Defines the TimescaleDB service.
 *   `requirements.txt`: Python dependencies.
-*   `assets/`: Images and other static assets for documentation.
 
+## Documentation & Tutorials
+
+For comprehensive guides, tutorials, and in-depth explanations of system components:
+
+*   **Start with the [Quick Start Guide](./docs/01_quick_start.md)** to get your environment set up and run through an initial data ingestion workflow.
+*   Explore other documents in the **[./docs/](./docs/)** directory for detailed information on data ingestion, feature engineering, database schema, and more.
 
 ## Prerequisites
 
@@ -114,7 +123,7 @@ The system includes a modular and configurable pipeline for generating financial
 2.  **Set up Python Environment (Conda Recommended):**
     If you don't have Conda, download and install [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://www.anaconda.com/products/distribution).
     ```bash
-    # Create a new Conda environment (e.g., named 'deep_alpha_env' with Python 3.9 or higher)
+    # Create a new Conda environment (e.g., named 'deep_alpha_env' with Python 3.10 or higher)
     conda create --name deep_alpha_env python=3.10 -y # Or your preferred Python 3.8+ version
     conda activate deep_alpha_env
     ```
@@ -213,7 +222,7 @@ Access in your browser, typically at `http://localhost:5001` (or as configured i
 
 It will look like this:
 
-![alt text](assets/data_viewer.gif)
+![alt text](docs/assets/data_viewer.gif)
 
 ### Database Management
 
